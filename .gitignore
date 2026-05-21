@@ -3,6 +3,7 @@
 
 .venv
 .myenv
+.claude/
 
 # Large data files
 *.pickle
