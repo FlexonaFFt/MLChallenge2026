@@ -28,7 +28,8 @@ def main():
     env = gym.make_env()
     print(f"env_id={gym.ENV_ID}")
 
-    agent = Agent(env)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    agent = Agent(env, model_path=os.path.join(script_dir, "model.pt"))
     agent.train(
         time_limit=args.time_limit,
         seed=args.seed,

@@ -28,7 +28,8 @@ def main():
     instances = load_jsonl(args.input)
     print(f"loaded {len(instances)} instances")
 
-    agent = Agent(env)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    agent = Agent(env, model_path=os.path.join(script_dir, "model.pt"))
     results = agent.solve_all(instances, args.time_limit)
 
     with open(args.output, "w", encoding="utf-8", newline="") as f:

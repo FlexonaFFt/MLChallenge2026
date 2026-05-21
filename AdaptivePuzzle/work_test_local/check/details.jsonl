@@ -1,0 +1,5 @@
+{"instance_id": "game_15_2d_000000", "baseline_length": 40, "moves": 26, "valid": true, "solved": true, "score": 1.5384615384615385, "ratio": 0.65, "error": null}
+{"instance_id": "game_15_2d_000001", "baseline_length": 60, "moves": 0, "valid": true, "solved": false, "score": 0.0, "ratio": Infinity, "error": null}
+{"instance_id": "game_15_2d_000002", "baseline_length": 40, "moves": 28, "valid": true, "solved": true, "score": 1.4285714285714286, "ratio": 0.7, "error": null}
+{"instance_id": "game_15_2d_000003", "baseline_length": 40, "moves": 38, "valid": true, "solved": true, "score": 1.0526315789473684, "ratio": 0.95, "error": null}
+{"instance_id": "game_15_2d_000004", "baseline_length": 100, "moves": 0, "valid": true, "solved": false, "score": 0.0, "ratio": Infinity, "error": null}

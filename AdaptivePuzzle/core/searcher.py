@@ -162,7 +162,8 @@ class BidirectionalSearcher:
         fwd_par: Dict[str, Tuple[Optional[str], Optional[str]]] = {start_k: (None, None)}
         h0 = float(self._v_fn([start])[0])
         counter = 0
-        fwd_heap = [(h0, counter, start_k, start)]
+        # heap entries: (f, counter, g, sk, st)
+        fwd_heap = [(h0, counter, 0, start_k, start)]
 
         # bwd_par[k] = (parent_k, inv_action) — inv_action takes k → parent_k (toward goal)
         bwd_g: Dict[str, int] = {self.solved_key: 0}
@@ -182,11 +183,9 @@ class BidirectionalSearcher:
             for _ in range(self.expand_batch):
                 if not fwd_heap:
                     break
-                f, _c, sk, st = heapq.heappop(fwd_heap)
-                g = fwd_g.get(sk, 1 << 30)
-                if f > g + 1e-6 + 1:  # stale entry (f was ng+h, g may have improved)
-                    # re-check: f = g_at_push + h; if current g < g_at_push it's stale
-                    pass  # we use g_score as authority; just proceed
+                f, _c, g, sk, st = heapq.heappop(fwd_heap)
+                if g > fwd_g.get(sk, 1 << 30):
+                    continue  # stale: a shorter path was found after this was pushed
                 total_expanded += 1
 
                 if sk in bwd_g:
@@ -218,7 +217,7 @@ class BidirectionalSearcher:
                 h_vals = self._v_fn([c[1] for c in fwd_children])
                 for (nsk, ns, ng), h in zip(fwd_children, h_vals):
                     counter += 1
-                    heapq.heappush(fwd_heap, (ng + float(h), counter, nsk, ns))
+                    heapq.heappush(fwd_heap, (ng + float(h), counter, ng, nsk, ns))
 
             # --- expand backward batch ---
             for _ in range(self.expand_batch):

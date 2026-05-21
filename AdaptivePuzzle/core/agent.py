@@ -18,12 +18,32 @@ SAFETY_MARGIN_TRAIN = 20
 SAFETY_MARGIN_SOLVE = 10
 
 
+def _find_pretrained(env_id: str, model_path: str) -> str | None:
+    """Return path to the best available pretrained checkpoint."""
+    specific = model_path.replace(".pt", f"_{env_id}.pt")
+    if os.path.exists(specific):
+        return specific
+    if os.path.exists(model_path):
+        return model_path
+    return None
+
+
 class Agent:
     def __init__(self, env, model_path: str = MODEL_PATH):
         self.env = env
         self.model_path = model_path
         self.encoder = StateEncoder()
         self.collector = DataCollector(env, self.encoder)
+
+    def _load_pretrained(self, env_id: str) -> ValueNet | None:
+        path = _find_pretrained(env_id, self.model_path)
+        if path is None:
+            return None
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        model = ValueNet()
+        model.load_state_dict(ckpt["state_dict"])
+        print(f"loaded pretrained model: {path}")
+        return model
 
     def train(
         self,
@@ -36,17 +56,13 @@ class Agent:
     ):
         start = time.time()
         deadline = start + time_limit - SAFETY_MARGIN_TRAIN
+        env_id = getattr(self.env, "env_id", "unknown")
 
-        model = ValueNet()
-        if os.path.exists(self.model_path):
-            ckpt = torch.load(self.model_path, map_location="cpu", weights_only=False)
-            model.load_state_dict(ckpt["state_dict"])
-            print("loaded pretrained model")
+        model = self._load_pretrained(env_id) or ValueNet()
 
         trainer = Trainer(model, self.collector, self.encoder, batch_size=batch_size, lr=lr)
         history = trainer.fit(deadline, num_pairs=num_pairs, max_walk=max_walk, seed=seed)
 
-        env_id = getattr(self.env, "env_id", "unknown")
         torch.save(
             {"state_dict": model.state_dict(), "config": {"env_id": env_id, "history": history}},
             self.model_path,
@@ -61,6 +77,7 @@ class Agent:
     ) -> List[Tuple[str, List[str]]]:
         start = time.time()
         deadline = start + time_limit - SAFETY_MARGIN_SOLVE
+        env_id = getattr(self.env, "env_id", "unknown")
 
         model = None
         if os.path.exists(self.model_path):

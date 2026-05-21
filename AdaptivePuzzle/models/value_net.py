@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from utils.common import DENSE_DIM, VALUE_VOCAB
 
 
-HIDDEN = 128
+HIDDEN = 256
 VALUE_EMB_DIM = 16
 
 
