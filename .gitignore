@@ -1,0 +1,16 @@
+.idea
+.DS_Store
+
+.venv
+.myenv
+
+# Large data files
+*.pickle
+*.parquet
+*.safetensors
+*.bin
+*.pt
+*.gguf
+
+# Model weights directories
+weights/
