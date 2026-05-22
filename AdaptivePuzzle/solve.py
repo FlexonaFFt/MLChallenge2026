@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--input", default="input_states.jsonl")
     parser.add_argument("--output", default="output_actions.csv")
     parser.add_argument("--time_limit", type=int,
-                        default=int(os.environ.get("SOLVE_TIME_LIMIT", 300)))
+                        default=int(os.environ.get("SOLVE_TIME_LIMIT", 1500)))
     args = parser.parse_args()
 
     torch.set_num_threads(min(8, os.cpu_count() or 1))

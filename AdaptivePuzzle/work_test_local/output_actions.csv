@@ -1,11 +1,21 @@
 instance_id,actions
-cylinder_game_000000,R_1 TR L_5 L_4 L_5 L_4 L_3 L_2 R_1 L_4 L_5 D_6 R_0 TR
-cylinder_game_000001,
-cylinder_game_000002,L_0 L_3 L_3 L_5 R_4 R_4 R_1 L_3 L_2 L_0
-cylinder_game_000003,TL D_6 R_3 L_5 R_0 R_1 R_2 R_3 R_4 L_5 R_4 R_3 R_2 R_1 R_0 TR
-cylinder_game_000004,
-cylinder_game_000005,R_5 L_4 L_3 L_4 L_3 L_1 TL D_6 L_4 L_3 L_1 TR
-cylinder_game_000006,L_4 L_5 D_5 D_6 L_5 TL L_5 R_2 L_1 TL
-cylinder_game_000007,L_0 TR TR L_2 R_1 L_5 TR L_3 L_2 L_0
-cylinder_game_000008,TL R_0 R_0 R_5 L_2 L_2 L_3 R_0 R_5 TL L_4 TL D_5 D_6 TR TR
-cylinder_game_000009,R_5 D_6 L_3 R_5 L_3 L_2 TL R_0 L_3 L_2 L_1 R_5 L_4 TL
+toggle_lights_000000,
+toggle_lights_000001,0_1 1_0 1_3 4_6 6_2 5_3 4_4 3_4 2_5 1_5
+toggle_lights_000002,4_2 1_6 6_1 6_3 6_5 2_1 0_3 0_1 0_0
+toggle_lights_000003,
+toggle_lights_000004,
+toggle_lights_000005,
+toggle_lights_000006,
+toggle_lights_000007,
+toggle_lights_000008,1_3 5_6 2_1 3_0 3_1 5_1 6_0 2_5 3_6 2_6 1_5
+toggle_lights_000009,
+toggle_lights_000010,
+toggle_lights_000011,
+toggle_lights_000012,
+toggle_lights_000013,1_1 2_5 2_3 5_2 3_2 4_3 4_2 5_1 5_0
+toggle_lights_000014,
+toggle_lights_000015,
+toggle_lights_000016,
+toggle_lights_000017,
+toggle_lights_000018,
+toggle_lights_000019,

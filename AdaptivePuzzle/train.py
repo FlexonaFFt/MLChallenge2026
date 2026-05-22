@@ -12,7 +12,7 @@ from core.agent import Agent
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--time_limit", type=int,
-                        default=int(os.environ.get("TRAIN_TIME_LIMIT", 600)))
+                        default=int(os.environ.get("TRAIN_TIME_LIMIT", 3000)))
     parser.add_argument("--seed", type=int, default=239)
     parser.add_argument("--num_pairs", type=int, default=40000)
     parser.add_argument("--max_walk", type=int, default=60)
