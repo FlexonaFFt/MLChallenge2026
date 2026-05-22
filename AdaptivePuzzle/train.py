@@ -15,7 +15,7 @@ def main():
                         default=int(os.environ.get("TRAIN_TIME_LIMIT", 3000)))
     parser.add_argument("--seed", type=int, default=239)
     parser.add_argument("--num_pairs", type=int, default=40000)
-    parser.add_argument("--max_walk", type=int, default=60)
+    parser.add_argument("--max_walk", type=int, default=120)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()

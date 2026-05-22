@@ -9,7 +9,7 @@ from models.value_net import ValueNet
 from core.encoder import StateEncoder
 from core.collector import DataCollector
 from core.trainer import Trainer
-from core.searcher import BidirectionalSearcher
+from core.searcher import BidirectionalSearcher, BeamSearcher
 
 
 MODEL_PATH = "model.pt"
@@ -108,7 +108,8 @@ class Agent:
             model.eval()
             print(f"solve: loaded model from {load_path}")
 
-        searcher = BidirectionalSearcher(self.env, self.encoder, model)
+        astar = BidirectionalSearcher(self.env, self.encoder, model)
+        beam = BeamSearcher(self.env, self.encoder, model, beam_width=100)
         n = len(instances)
         results = []
 
@@ -120,12 +121,20 @@ class Agent:
 
             remaining = n - i
             inst_deadline = time.time() + max(0.5, (deadline - time.time()) / remaining)
+            # Give A* 40% of the budget; beam search gets the rest
+            astar_deadline = time.time() + 0.4 * (inst_deadline - time.time())
 
+            sol = None
             try:
-                sol = searcher.solve(inst["state"], inst_deadline)
+                sol = astar.solve(inst["state"], astar_deadline)
             except Exception as e:
-                print(f"  {iid} failed: {repr(e)}")
-                sol = None
+                print(f"  {iid} A* failed: {repr(e)}")
+
+            if sol is None and time.time() < inst_deadline:
+                try:
+                    sol = beam.solve(inst["state"], inst_deadline)
+                except Exception as e:
+                    print(f"  {iid} beam failed: {repr(e)}")
 
             results.append((iid, sol or []))
 
