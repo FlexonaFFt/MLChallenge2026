@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--input", default="input_states.jsonl")
     parser.add_argument("--output", default="output_actions.csv")
     parser.add_argument("--time_limit", type=int,
-                        default=int(os.environ.get("SOLVE_TIME_LIMIT", 60)))
+                        default=int(os.environ.get("SOLVE_TIME_LIMIT", 300)))
     args = parser.parse_args()
 
     torch.set_num_threads(min(8, os.cpu_count() or 1))
@@ -28,8 +28,7 @@ def main():
     instances = load_jsonl(args.input)
     print(f"loaded {len(instances)} instances")
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    agent = Agent(env, model_path=os.path.join(script_dir, "model.pt"))
+    agent = Agent(env)
     results = agent.solve_all(instances, args.time_limit)
 
     with open(args.output, "w", encoding="utf-8", newline="") as f:

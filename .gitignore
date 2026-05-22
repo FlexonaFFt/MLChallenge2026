@@ -1,9 +1,21 @@
-.idea
+.idea/
 .DS_Store
 
-.venv
-.myenv
+.venv/
+.myenv/
 .claude/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
 
 # Large data files
 *.pickle
@@ -12,6 +24,26 @@
 *.bin
 *.pt
 *.gguf
+*.npz
+*.npy
 
 # Model weights directories
 weights/
+
+# Datasets and submissions
+dataset/
+submission/
+
+# Logs and experiment artifacts
+*.log
+runs/
+wandb/
+
+# AdaptivePuzzle — generated at runtime
+AdaptivePuzzle/input_states.jsonl
+AdaptivePuzzle/output_actions.csv
+AdaptivePuzzle/verdict.txt
+AdaptivePuzzle/score.json
+AdaptivePuzzle/details.jsonl
+AdaptivePuzzle/meta.json
+AdaptivePuzzle/work_test_local/

@@ -19,12 +19,29 @@ SAFETY_MARGIN_SOLVE = 10
 
 
 def _find_pretrained(env_id: str, model_path: str) -> str | None:
-    """Return path to the best available pretrained checkpoint."""
+    """Return path to the best available pretrained checkpoint.
+
+    Search order:
+      1. model_{env_id}.pt in the participant code directory (/opt/participant/)
+         — found even when CWD is /workspace (separate train/solve containers).
+      2. model_{env_id}.pt relative to model_path (local dev fallback).
+      3. model_path itself (a previously fine-tuned checkpoint saved in workspace).
+    """
+    # core/agent.py lives in <code_dir>/core/agent.py  →  parent = code root
+    _code_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base = os.path.basename(model_path).replace(".pt", f"_{env_id}.pt")
+
+    specific_code = os.path.join(_code_dir, base)
+    if os.path.exists(specific_code):
+        return specific_code
+
     specific = model_path.replace(".pt", f"_{env_id}.pt")
     if os.path.exists(specific):
         return specific
+
     if os.path.exists(model_path):
         return model_path
+
     return None
 
 
@@ -80,11 +97,16 @@ class Agent:
         env_id = getattr(self.env, "env_id", "unknown")
 
         model = None
-        if os.path.exists(self.model_path):
-            ckpt = torch.load(self.model_path, map_location="cpu", weights_only=False)
+        load_path = self.model_path
+        if not os.path.exists(load_path):
+            # Fallback: pretrained checkpoint from code directory
+            load_path = _find_pretrained(env_id, self.model_path) or ""
+        if load_path and os.path.exists(load_path):
+            ckpt = torch.load(load_path, map_location="cpu", weights_only=False)
             model = ValueNet()
             model.load_state_dict(ckpt["state_dict"])
             model.eval()
+            print(f"solve: loaded model from {load_path}")
 
         searcher = BidirectionalSearcher(self.env, self.encoder, model)
         n = len(instances)

@@ -12,7 +12,7 @@ from core.agent import Agent
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--time_limit", type=int,
-                        default=int(os.environ.get("TRAIN_TIME_LIMIT", 60)))
+                        default=int(os.environ.get("TRAIN_TIME_LIMIT", 600)))
     parser.add_argument("--seed", type=int, default=239)
     parser.add_argument("--num_pairs", type=int, default=40000)
     parser.add_argument("--max_walk", type=int, default=60)
@@ -28,8 +28,7 @@ def main():
     env = gym.make_env()
     print(f"env_id={gym.ENV_ID}")
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    agent = Agent(env, model_path=os.path.join(script_dir, "model.pt"))
+    agent = Agent(env)
     agent.train(
         time_limit=args.time_limit,
         seed=args.seed,
