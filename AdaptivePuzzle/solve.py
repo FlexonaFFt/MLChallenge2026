@@ -16,8 +16,8 @@ from model import ValueNet
 from search import solve_astar
 
 
-TIME_LIMIT_DEFAULT = 1 * 60
-SAFETY_MARGIN = 10
+TIME_LIMIT_DEFAULT = 25 * 60
+SAFETY_MARGIN = 30
 MODEL_PATH = "model.pt"
 
 

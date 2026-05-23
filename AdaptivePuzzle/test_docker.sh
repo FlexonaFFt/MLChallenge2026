@@ -7,8 +7,8 @@
 #   num_instances — puzzles to generate (default: 10)
 #
 # Env vars (все прокидываются в Docker как есть):
-#   TRAIN_TIME_LIMIT  секунды (не задан по умолчанию → train.py использует свой дефолт 600)
-#   SOLVE_TIME_LIMIT  секунды (не задан по умолчанию → solve.py использует свой дефолт 300)
+#   TRAIN_TIME_LIMIT  секунды (не задан по умолчанию → train.py использует свой дефолт 50*60 = 3000)
+#   SOLVE_TIME_LIMIT  секунды (не задан по умолчанию → solve.py использует свой дефолт 25*60 = 1500)
 #   TRAIN_CPUS        (default: 4)    CI uses 8
 #   TRAIN_MEM         (default: 8g)   CI uses 32g
 #   SOLVE_CPUS        (default: 4)    CI uses 8

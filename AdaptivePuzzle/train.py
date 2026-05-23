@@ -16,8 +16,8 @@ import common
 from model import ValueNet
 
 
-TIME_LIMIT_DEFAULT = 1 * 60
-SAFETY_MARGIN = 20
+TIME_LIMIT_DEFAULT = 50 * 60
+SAFETY_MARGIN = 60
 MODEL_PATH = "model.pt"
 META_PATH = "meta.json"
 
