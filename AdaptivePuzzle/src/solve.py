@@ -13,7 +13,7 @@ import gym
 import common
 from common import state_key
 from model import ValueNet
-from search import solve_astar, solve_bidirectional
+from search import solve_astar, solve_bidirectional, build_linear_solver
 
 
 TIME_LIMIT_DEFAULT = 25 * 60
@@ -73,6 +73,10 @@ def _init_worker(budget: float, global_deadline: float):
     _W["v_fn"] = make_v_fn(env, model)
     _W["budget"] = budget
     _W["gdl"] = global_deadline
+    _W["w"] = float(os.environ.get("ASTAR_WEIGHT", "1.0"))
+    # Detect a GF(2)/XOR (Lights-Out-like) puzzle once; if so we solve those
+    # instances exactly and instantly instead of searching.
+    _W["lin"] = build_linear_solver(env)
 
 
 def _solve_one(inst):
@@ -82,15 +86,21 @@ def _solve_one(inst):
         return iid, []
     inst_deadline = min(now + _W["budget"], _W["gdl"])
     try:
+        # Phase 0: exact GF(2) solve for linear (Lights-Out-like) puzzles.
+        sol = None
+        if _W["lin"] is not None:
+            sol = _W["lin"].solve(_W["env"], inst["state"])
         # Phase 1: bidirectional BFS (shortest path -> best ratio). Give it most
         # of the per-instance budget, then fall back to V-guided A*.
-        bidi_deadline = now + 0.6 * (inst_deadline - now)
-        sol = solve_bidirectional(
-            _W["env"], inst["state"], _W["solved_state"], bidi_deadline
-        )
+        if sol is None:
+            bidi_deadline = now + 0.6 * (inst_deadline - now)
+            sol = solve_bidirectional(
+                _W["env"], inst["state"], _W["solved_state"], bidi_deadline
+            )
         if sol is None:
             sol = solve_astar(
-                _W["env"], inst["state"], _W["solved_k"], _W["v_fn"], inst_deadline
+                _W["env"], inst["state"], _W["solved_k"], _W["v_fn"], inst_deadline,
+                weight=_W["w"],
             )
     except Exception as e:
         print(f"  {iid} failed: {repr(e)}")

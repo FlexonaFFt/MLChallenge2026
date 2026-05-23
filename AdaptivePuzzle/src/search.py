@@ -1,7 +1,8 @@
-"""Search: bidirectional BFS (meet-in-the-middle) + forward A* with V heuristic."""
+"""Search: GF(2) linear solver + bidirectional BFS + forward A* with V heuristic."""
 
 import heapq
 import json
+import random
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -13,6 +14,133 @@ from common import state_key, to_jsonable
 def _key(jsonable_state) -> str:
     """Canonical key for an already-jsonable state (matches common.state_key)."""
     return json.dumps(jsonable_state, sort_keys=True)
+
+
+# =====================================================================
+# GF(2) linear solver (Lights-Out-like / TOGGLE puzzles)
+# =====================================================================
+#
+# A puzzle is "linear over GF(2)" when every action is an involution that
+# flips a fixed (state-independent) set of binary cells. Then pressing a set
+# of actions XORs their masks, order-independent. To reach the goal we solve
+#   XOR of pressed action masks  ==  (content XOR target)   over GF(2),
+# which Gaussian elimination does exactly and instantly.
+
+
+def _changed_mask(before: List[int], after: List[int]) -> int:
+    m = 0
+    for i, (b, a) in enumerate(zip(before, after)):
+        if b != a:
+            m |= (1 << i)
+    return m
+
+
+class LinearGF2Solver:
+    """Precomputed GF(2) basis over the action masks; solves any instance fast."""
+
+    def __init__(self, actions: List[str], masks: List[int]):
+        self.actions = actions
+        # Reduced basis: list of (vec, combo) where `vec` is a mask in row-echelon
+        # form (unique leading bit) and `combo` is the action-index bitmask that
+        # XORs to `vec`.
+        basis: List[Tuple[int, int]] = []
+        for i, m in enumerate(masks):
+            vec, combo = m, (1 << i)
+            for bvec, bcombo in basis:
+                lead = bvec.bit_length() - 1
+                if (vec >> lead) & 1:
+                    vec ^= bvec
+                    combo ^= bcombo
+            if vec:
+                basis.append((vec, combo))
+                basis.sort(key=lambda t: t[0].bit_length(), reverse=True)
+        self.basis = basis
+
+    def solve_target(self, b: int) -> Optional[List[str]]:
+        """Return actions whose masks XOR to b, or None if unsolvable."""
+        x, combo = b, 0
+        for bvec, bcombo in self.basis:
+            lead = bvec.bit_length() - 1
+            if (x >> lead) & 1:
+                x ^= bvec
+                combo ^= bcombo
+        if x != 0:
+            return None
+        return [self.actions[i] for i in range(len(self.actions)) if (combo >> i) & 1]
+
+    def solve(self, env, state) -> Optional[List[str]]:
+        enc = env.encode_state(state)
+        content = enc["content_values"]
+        target = enc["target_values"]
+        if len(content) != len(target):
+            return None
+        b = _changed_mask(target, content)  # bits where current != goal
+        return self.solve_target(b)
+
+
+def build_linear_solver(env) -> Optional["LinearGF2Solver"]:
+    """Detect a GF(2)/XOR puzzle and precompute a solver, else return None.
+
+    Conservative: requires constant action set, binary cell values, each action
+    an involution with a state-independent flip mask. Permutation puzzles (values
+    not in {0,1}) are rejected immediately, so this never misfires on them.
+    """
+    try:
+        env.reset()
+        enc0 = env.encode_state()
+        content0 = enc0["content_values"]
+        target0 = enc0["target_values"]
+        n = len(content0)
+        if n == 0 or n > 4096:
+            return None
+        if any(v not in (0, 1) for v in content0):
+            return None
+        if any(v not in (0, 1) for v in target0):
+            return None
+
+        actions = list(env.valid_actions())
+        if not actions:
+            return None
+
+        # Action masks from the solved state + involution check.
+        masks: List[int] = []
+        for a in actions:
+            env.reset()
+            before = env.encode_state()["content_values"]
+            env.step(a)
+            after = env.encode_state()["content_values"]
+            masks.append(_changed_mask(before, after))
+            env.step(a)  # involution: applying twice must return
+            if env.encode_state()["content_values"] != before:
+                return None
+
+        # Verify action set is state-independent and masks are state-independent
+        # from a scrambled state.
+        env.reset()
+        rng = random.Random(0)
+        for _ in range(12):
+            valid = env.valid_actions()
+            if not valid:
+                break
+            env.step(rng.choice(valid))
+        if list(env.valid_actions()) != actions:
+            return None
+        scr_vals = env.encode_state()["content_values"]
+        if any(v not in (0, 1) for v in scr_vals):
+            return None
+        for a, m in zip(actions, masks):
+            st = env.get_state()
+            before = env.encode_state()["content_values"]
+            env.step(a)
+            after = env.encode_state()["content_values"]
+            if _changed_mask(before, after) != m:
+                return None
+            env.set_state(st)
+
+        env.reset()
+        return LinearGF2Solver(actions, masks)
+    except Exception:
+        return None
 
 
 def solve_bidirectional(
@@ -131,8 +259,10 @@ def solve_astar(
     deadline: float,
     max_nodes: int = 50_000,
     expand_batch: int = 32,
+    weight: float = 1.0,
 ) -> Optional[List[str]]:
-    """A* with f = g + V(s). Returns action list or None."""
+    """Weighted A* with f = g + weight * V(s). weight>1 trades solution length
+    for speed/coverage (greedier toward the goal). Returns action list or None."""
     start = to_jsonable(initial_state)
     start_k = state_key(start)
     if start_k == solved_key:
@@ -143,7 +273,7 @@ def solve_astar(
 
     h0 = float(v_fn([start])[0]) if v_fn else 0.0
     counter = 0
-    open_heap = [(h0, counter, 0, start_k, start)]
+    open_heap = [(weight * h0, counter, 0, start_k, start)]
     expanded = 0
 
     while open_heap:
@@ -196,7 +326,7 @@ def solve_astar(
             parents[nsk] = (psk, a)
             g_score[nsk] = ng
             counter += 1
-            heapq.heappush(open_heap, (ng + float(h), counter, ng, nsk, ns))
+            heapq.heappush(open_heap, (ng + weight * float(h), counter, ng, nsk, ns))
             expanded += 1
             if expanded >= max_nodes:
                 break

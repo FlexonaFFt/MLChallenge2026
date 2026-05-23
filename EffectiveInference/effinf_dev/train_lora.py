@@ -43,6 +43,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train_jsonl", required=True)
     p.add_argument("--output_dir", required=True)
     p.add_argument("--base_model", default="Qwen/Qwen3-1.7B")
+    p.add_argument("--eval_jsonl", default="", help="held-out для eval-loss (опц.)")
+    p.add_argument("--eval_samples", type=int, default=300)
+    p.add_argument("--resume", action="store_true",
+                   help="докатить с последнего чекпоинта в output_dir после обрыва")
     p.add_argument("--max_len", type=int, default=1024)
     p.add_argument("--epochs", type=float, default=2.0)
     p.add_argument(
@@ -72,6 +76,23 @@ def pick_dtype():
 def load_jsonl(path: str) -> list[dict]:
     with open(path, encoding="utf-8") as f:
         return [json.loads(line) for line in f]
+
+
+def eval_records(path: str, variant: str, limit: int) -> list[dict]:
+    """eval.jsonl ({rid,query,reference}) → messages с тем же системным промптом."""
+    from prompts import MINIMAL_SYSTEM, RICH_SYSTEM
+    system = MINIMAL_SYSTEM if variant == "minimal" else RICH_SYSTEM
+    rows = load_jsonl(path)
+    if limit > 0:
+        rows = rows[:limit]
+    return [
+        {"messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": r["query"]},
+            {"role": "assistant", "content": r["reference"]},
+        ]}
+        for r in rows
+    ]
 
 
 def build_dataset(records: list[dict], tokenizer, max_len: int) -> Dataset:
@@ -164,6 +185,14 @@ def main() -> None:
     ds = build_dataset(records, tokenizer, args.max_len)
     print(f"train examples after encode/filter: {len(ds)}")
 
+    eval_ds = None
+    if args.eval_jsonl:
+        eval_ds = build_dataset(
+            eval_records(args.eval_jsonl, args.variant, args.eval_samples),
+            tokenizer, args.max_len,
+        )
+        print(f"eval examples: {len(eval_ds)}")
+
     targs = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
@@ -177,6 +206,8 @@ def main() -> None:
         logging_steps=10,
         save_steps=args.save_steps,
         save_total_limit=2,
+        eval_strategy="epoch" if eval_ds is not None else "no",
+        per_device_eval_batch_size=max(1, args.batch),
         bf16=not use_fp16,
         fp16=use_fp16,
         gradient_checkpointing=True,
@@ -190,9 +221,10 @@ def main() -> None:
         model=model,
         args=targs,
         train_dataset=ds,
+        eval_dataset=eval_ds,
         data_collator=Collator(tokenizer.pad_token_id),
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume)
 
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
