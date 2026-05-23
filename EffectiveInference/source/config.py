@@ -18,14 +18,19 @@ SYSTEM_PROMPT = (
     "Отвечай на языке вопроса."
 )
 
+# Минимальный промпт — для дообученной модели (стиль приходит из весов).
+# ВАЖНО: должен дословно совпадать с MINIMAL_SYSTEM в effinf_dev/prepare_data.py.
+MINIMAL_SYSTEM = "Отвечай на языке вопроса."
+
 
 @dataclass
 class InferenceConfig:
     model_dir: str = "./weights"
-    max_new_tokens: int = 512
+    max_new_tokens: int = 1024
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
     temperature: float = 0.0
-    system_prompt: str = field(default=SYSTEM_PROMPT)
+    # дообучали minimal → инференс тем же промптом. Для rich-варианта: SYSTEM_PROMPT.
+    system_prompt: str = field(default=MINIMAL_SYSTEM)
     enable_prefix_caching: bool = True
     max_num_seqs: int = 256

@@ -1,0 +1,9 @@
+# R&D-обвес и данные — НЕ должны попадать ни в docker-образ, ни в zip-посылку.
+effinf_dev/
+dataset_ml_challenge.parquet
+example-dataset.pickle
+download_weights.py
+**/__pycache__/
+*.pyc
+.DS_Store
+weights/.cache/
