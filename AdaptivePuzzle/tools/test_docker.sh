@@ -2,6 +2,10 @@
 # Local CI replica: docker build → train → solve → check
 # Reproduces the real checking system as closely as possible.
 #
+# Layout: this script lives in tools/; submission code + Dockerfile live in ../src/.
+# The Docker image is built from ../src (its build context), so the image
+# contains exactly what the submission zip contains.
+#
 # Usage: ./test_docker.sh <task> [num_instances]
 #   task          — ENV_ID value: game_15_2d | toggle_lights | cylinder_game
 #   num_instances — puzzles to generate (default: 10)
@@ -18,6 +22,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC_DIR="$(cd "${SCRIPT_DIR}/../src" && pwd)"
 
 TASK="${1:-game_15_2d}"
 NUM_INSTANCES="${2:-10}"
@@ -65,11 +70,11 @@ fi
 rm -rf "$WORK_DIR"
 
 # ---------------------------------------------------------------------------
-# Step 2: Build participant Docker image
+# Step 2: Build participant Docker image (build context = ../src)
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Building participant Docker image ==="
-docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+docker build -t "$IMAGE_NAME" "$SRC_DIR"
 
 # ---------------------------------------------------------------------------
 # Step 3: Prepare workspace (mirrors CI before_script)
@@ -93,7 +98,7 @@ echo ""
 echo "=== Generating test instances ==="
 
 cd "$SCRIPT_DIR"
-PYTHONPATH="${WORK_DIR}:${SCRIPT_DIR}" \
+PYTHONPATH="${WORK_DIR}" \
     python3 "${SCRIPT_DIR}/generate_states.py" \
         --num_instances "$NUM_INSTANCES" \
         --public_output "${WORK_DIR}/input_states.jsonl"

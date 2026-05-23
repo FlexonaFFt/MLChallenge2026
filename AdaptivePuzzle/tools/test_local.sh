@@ -2,13 +2,21 @@
 # Local run without Docker: generate → train → solve → check
 # Useful for quick iteration; no resource limits, no network isolation.
 #
+# Layout: this script lives in tools/; submission code lives in ../src/.
+#
 # Usage: ./test_local.sh <task> [num_instances]
 #   task          — ENV_ID value: game_15_2d | toggle_lights | cylinder_game
 #   num_instances — puzzles to generate (default: 5)
+#
+# Env:
+#   PYTHON  — python interpreter to use (default: python3). Set to a venv
+#             python that has torch+numpy, e.g. PYTHON=../../.venv/bin/python
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC_DIR="$(cd "${SCRIPT_DIR}/../src" && pwd)"
+PYTHON="${PYTHON:-python3}"
 
 TASK="${1:-game_15_2d}"
 NUM_INSTANCES="${2:-5}"
@@ -32,8 +40,8 @@ echo ""
 echo "=== Generating test instances ==="
 
 cd "$SCRIPT_DIR"
-PYTHONPATH="${WORK_DIR}:${SCRIPT_DIR}" \
-    python3 "${SCRIPT_DIR}/generate_states.py" \
+PYTHONPATH="${WORK_DIR}" \
+    "$PYTHON" "${SCRIPT_DIR}/generate_states.py" \
         --num_instances "$NUM_INSTANCES" \
         --public_output "${WORK_DIR}/input_states.jsonl"
 
@@ -49,8 +57,8 @@ echo "Generated $(wc -l < "${WORK_DIR}/input_states.jsonl") test instances"
 echo ""
 echo "=== TRAIN PHASE ==="
 cd "$WORK_DIR"
-PYTHONPATH="${WORK_DIR}:${SCRIPT_DIR}" \
-    python3 "${SCRIPT_DIR}/train.py"
+PYTHONPATH="${WORK_DIR}:${SRC_DIR}" \
+    "$PYTHON" "${SRC_DIR}/train.py"
 
 # ---------------------------------------------------------------------------
 # Step 4: SOLVE
@@ -58,8 +66,8 @@ PYTHONPATH="${WORK_DIR}:${SCRIPT_DIR}" \
 echo ""
 echo "=== SOLVE PHASE ==="
 cd "$WORK_DIR"
-PYTHONPATH="${WORK_DIR}:${SCRIPT_DIR}" \
-    python3 "${SCRIPT_DIR}/solve.py"
+PYTHONPATH="${WORK_DIR}:${SRC_DIR}" \
+    "$PYTHON" "${SRC_DIR}/solve.py"
 
 if [ ! -f "${WORK_DIR}/output_actions.csv" ]; then
     echo "ERROR: solve.py did not produce output_actions.csv"
@@ -80,7 +88,7 @@ cp "${WORK_DIR}/output_actions.csv"     "${CHECK_DIR}/output_actions.csv"
 
 cd "$CHECK_DIR"
 PYTHONPATH="${CHECK_DIR}" \
-    python3 "${SCRIPT_DIR}/check.py" \
+    "$PYTHON" "${SCRIPT_DIR}/check.py" \
         --input input_states.jsonl \
         --submission output_actions.csv
 

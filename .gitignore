@@ -39,11 +39,13 @@ submission/
 runs/
 wandb/
 
-# AdaptivePuzzle — generated at runtime
-AdaptivePuzzle/input_states.jsonl
-AdaptivePuzzle/output_actions.csv
-AdaptivePuzzle/verdict.txt
-AdaptivePuzzle/score.json
-AdaptivePuzzle/details.jsonl
-AdaptivePuzzle/meta.json
-AdaptivePuzzle/work_test_local/
+# AdaptivePuzzle — generated at runtime / build artifacts
+AdaptivePuzzle/submission.zip
+AdaptivePuzzle/**/work_test_local/
+AdaptivePuzzle/**/work_test_ci/
+AdaptivePuzzle/**/input_states.jsonl
+AdaptivePuzzle/**/output_actions.csv
+AdaptivePuzzle/**/verdict.txt
+AdaptivePuzzle/**/score.json
+AdaptivePuzzle/**/details.jsonl
+AdaptivePuzzle/**/meta.json
