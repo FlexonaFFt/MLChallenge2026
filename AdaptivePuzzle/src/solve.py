@@ -13,7 +13,7 @@ import gym
 import common
 from common import state_key
 from model import ValueNet
-from search import solve_astar
+from search import solve_astar, solve_bidirectional
 
 
 TIME_LIMIT_DEFAULT = 25 * 60
@@ -53,6 +53,51 @@ def make_v_fn(env, model):
     return v_fn
 
 
+# ---------------------------------------------------------------------------
+# Worker setup (used both by the multiprocessing pool and the sequential
+# fallback). Each worker owns its own env + model so nothing is shared across
+# processes. torch is pinned to 1 thread per worker to avoid oversubscription.
+# ---------------------------------------------------------------------------
+
+_W: dict = {}
+
+
+def _init_worker(budget: float, global_deadline: float):
+    torch.set_num_threads(1)
+    env = gym.make_env()
+    env.reset()
+    model = load_model()
+    _W["env"] = env
+    _W["solved_state"] = common.to_jsonable(env.get_state())
+    _W["solved_k"] = state_key(env.get_state())
+    _W["v_fn"] = make_v_fn(env, model)
+    _W["budget"] = budget
+    _W["gdl"] = global_deadline
+
+
+def _solve_one(inst):
+    iid = inst["instance_id"]
+    now = time.time()
+    if now >= _W["gdl"]:
+        return iid, []
+    inst_deadline = min(now + _W["budget"], _W["gdl"])
+    try:
+        # Phase 1: bidirectional BFS (shortest path -> best ratio). Give it most
+        # of the per-instance budget, then fall back to V-guided A*.
+        bidi_deadline = now + 0.6 * (inst_deadline - now)
+        sol = solve_bidirectional(
+            _W["env"], inst["state"], _W["solved_state"], bidi_deadline
+        )
+        if sol is None:
+            sol = solve_astar(
+                _W["env"], inst["state"], _W["solved_k"], _W["v_fn"], inst_deadline
+            )
+    except Exception as e:
+        print(f"  {iid} failed: {repr(e)}")
+        sol = None
+    return iid, list(sol or [])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default="input_states.jsonl")
@@ -63,48 +108,80 @@ def main():
 
     start = time.time()
     deadline = start + args.time_limit - SAFETY_MARGIN
-    torch.set_num_threads(min(8, os.cpu_count() or 1))
 
-    env = gym.make_env()
     instances = load_jsonl(args.input)
-    print(f"loaded {len(instances)} instances")
-
-    model = load_model()
-    print(f"model loaded: {model is not None}")
-
-    env.reset()
-    solved_k = state_key(env.get_state())
-    v_fn = make_v_fn(env, model)
-
     n = len(instances)
-    solved = 0
+    print(f"loaded {n} instances")
+    print(f"model present: {os.path.exists(MODEL_PATH)}")
+
+    # Fair per-instance compute budget: with W workers over the wall window,
+    # each instance may use up to W * window / n seconds of CPU time.
+    workers = max(1, min(8, os.cpu_count() or 1))
+    window = max(0.0, deadline - time.time())
+    budget = max(0.5, workers * window / n) if n else 0.5
+    print(f"workers={workers} per-instance budget={budget:.1f}s")
+
+    results: dict = {}
+    ran_parallel = False
+
+    if workers > 1 and n > 1:
+        try:
+            import multiprocessing as mp
+            ctx = mp.get_context("spawn")  # safe with torch on every platform
+            pool = ctx.Pool(
+                processes=workers,
+                initializer=_init_worker,
+                initargs=(budget, deadline),
+            )
+            # HARD WALL GUARD: stop collecting at `deadline` no matter what the
+            # workers are doing, then force-kill the pool. This guarantees
+            # solve.py finishes before the grader's hard time-limit kill
+            # (SAFETY_MARGIN covers terminate + CSV write). Without this the
+            # pool teardown can hang on a stuck worker -> TL.
+            try:
+                it = pool.imap_unordered(_solve_one, instances, chunksize=1)
+                done = 0
+                while done < n:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        print("  wall deadline reached; stopping collection")
+                        break
+                    try:
+                        iid, acts = it.next(timeout=remaining)
+                    except mp.TimeoutError:
+                        print("  wall deadline reached (timeout); stopping collection")
+                        break
+                    except StopIteration:
+                        break
+                    results[iid] = acts
+                    done += 1
+                    if done % 50 == 0:
+                        nsolved = sum(1 for v in results.values() if v)
+                        print(f"  {done}/{n} solved={nsolved} elapsed={time.time()-start:.0f}s")
+            finally:
+                pool.terminate()
+                pool.join()
+            ran_parallel = True
+        except Exception as e:
+            print(f"parallel pool failed ({e!r}); falling back to sequential")
+            results = {}
+
+    if not ran_parallel:
+        _init_worker(budget, deadline)
+        for inst in instances:
+            if time.time() >= deadline:
+                break
+            iid, acts = _solve_one(inst)
+            results[iid] = acts
+
+    solved = sum(1 for v in results.values() if v)
 
     with open(args.output, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["instance_id", "actions"])
         writer.writeheader()
-
-        for i, inst in enumerate(instances):
+        for inst in instances:
             iid = inst["instance_id"]
-            if time.time() >= deadline:
-                writer.writerow({"instance_id": iid, "actions": ""})
-                continue
-
-            remaining = n - i
-            inst_deadline = time.time() + max(0.5, (deadline - time.time()) / remaining)
-
-            try:
-                sol = solve_astar(env, inst["state"], solved_k, v_fn, inst_deadline)
-            except Exception as e:
-                print(f"  {iid} failed: {repr(e)}")
-                sol = None
-
-            actions = sol or []
-            writer.writerow({"instance_id": iid, "actions": " ".join(actions)})
-            if actions:
-                solved += 1
-
-            if (i + 1) % 25 == 0:
-                print(f"  {i+1}/{n} solved={solved} elapsed={time.time()-start:.0f}s")
+            writer.writerow({"instance_id": iid, "actions": " ".join(results.get(iid, []))})
 
     print(f"final: solved {solved}/{n}, time {time.time()-start:.1f}s")
 
