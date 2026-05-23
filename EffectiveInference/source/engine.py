@@ -29,12 +29,17 @@ class SchoolQAEngine:
         )
 
     def _build_prompts(self, questions: list[str]) -> list[str]:
+        # system + few-shot примеры (как реальные реплики) + сам вопрос.
+        # Общий префикс одинаков для всех запросов → кэшируется prefix caching.
+        few_shot_msgs = []
+        for q, a in self.config.few_shot:
+            few_shot_msgs.append({"role": "user", "content": q})
+            few_shot_msgs.append({"role": "assistant", "content": a})
         return [
             self.tokenizer.apply_chat_template(
-                [
-                    {"role": "system", "content": self.config.system_prompt},
-                    {"role": "user", "content": question},
-                ],
+                [{"role": "system", "content": self.config.system_prompt}]
+                + few_shot_msgs
+                + [{"role": "user", "content": question}],
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=False,

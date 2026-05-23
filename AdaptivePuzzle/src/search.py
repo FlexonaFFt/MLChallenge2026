@@ -186,18 +186,27 @@ def build_manhattan_h(env) -> Optional[Callable[[List[Any]], np.ndarray]]:
         adj = collections.defaultdict(set)
         rng = random.Random(0)
         env.reset()
+        before = env.encode_state()["content_values"]
         cur = blank_of(env.encode_state())
         for _ in range(4000):
             valid = env.valid_actions()
             if not valid:
                 break
             env.step(rng.choice(valid))
+            after = env.encode_state()["content_values"]
             nb = blank_of(env.encode_state())
             if nb is None:
                 return None
-            if nb != cur:
-                adj[cur].add(nb)
-                adj[nb].add(cur)
+            # STRICT: a genuine slide changes EXACTLY two cells (blank + one
+            # piece swap) and the blank is one of them. Anything else (a move
+            # that shifts several pieces) makes graph-Manhattan inadmissible,
+            # so we bail and let the generic bidi/A* path handle this puzzle.
+            changed = [i for i in range(N) if before[i] != after[i]]
+            if len(changed) != 2 or cur not in changed or nb not in changed:
+                return None
+            adj[cur].add(nb)
+            adj[nb].add(cur)
+            before = after
             cur = nb
         if not adj:
             return None

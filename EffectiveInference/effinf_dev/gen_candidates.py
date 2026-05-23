@@ -34,12 +34,15 @@ def main() -> None:
     p.add_argument("--max_tokens", type=int, default=1024)
     p.add_argument("--max_model_len", type=int, default=4096)
     p.add_argument("--dtype", default="auto", help="auto|float16|bfloat16 (T4 → float16)")
+    p.add_argument("--limit", type=int, default=0, help="0 = все; иначе первые N (быстрая проба)")
     args = p.parse_args()
 
     system = MINIMAL_SYSTEM if args.variant == "minimal" else RICH_SYSTEM
 
     with open(args.eval_jsonl, encoding="utf-8") as f:
         rows = [json.loads(line) for line in f]
+    if args.limit > 0:
+        rows = rows[: args.limit]
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, use_fast=True)
     prompts = [
