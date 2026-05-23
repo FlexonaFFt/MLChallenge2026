@@ -13,7 +13,9 @@ import gym
 import common
 from common import state_key
 from model import ValueNet
-from search import solve_astar, solve_bidirectional, build_linear_solver
+from search import (
+    solve_astar, solve_bidirectional, build_linear_solver, build_manhattan_h,
+)
 
 
 TIME_LIMIT_DEFAULT = 25 * 60
@@ -77,6 +79,9 @@ def _init_worker(budget: float, global_deadline: float):
     # Detect a GF(2)/XOR (Lights-Out-like) puzzle once; if so we solve those
     # instances exactly and instantly instead of searching.
     _W["lin"] = build_linear_solver(env)
+    # Detect a single-blank sliding puzzle once; if so use an admissible
+    # graph-Manhattan heuristic in A* (optimal, strong) instead of the net.
+    _W["slide_h"] = None if _W["lin"] is not None else build_manhattan_h(env)
 
 
 def _solve_one(inst):
@@ -90,6 +95,13 @@ def _solve_one(inst):
         sol = None
         if _W["lin"] is not None:
             sol = _W["lin"].solve(_W["env"], inst["state"])
+        # Phase 0.5: sliding puzzle -> A* with admissible graph-Manhattan
+        # heuristic (optimal, far stronger than the learned net here).
+        if sol is None and _W["slide_h"] is not None:
+            sol = solve_astar(
+                _W["env"], inst["state"], _W["solved_k"], _W["slide_h"],
+                inst_deadline, max_nodes=2_000_000, weight=1.0,
+            )
         # Phase 1: bidirectional BFS (shortest path -> best ratio). Give it most
         # of the per-instance budget, then fall back to V-guided A*.
         if sol is None:

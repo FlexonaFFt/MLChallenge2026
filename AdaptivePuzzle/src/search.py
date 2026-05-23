@@ -143,6 +143,102 @@ def build_linear_solver(env) -> Optional["LinearGF2Solver"]:
         return None
 
 
+# Content-type codes (mirror gym.py): EMPTY=0, NUM=1, COLOR=2, MASKED=3
+_C_EMPTY = 0
+_C_NUM = 1
+
+
+def build_manhattan_h(env) -> Optional[Callable[[List[Any]], np.ndarray]]:
+    """Detect a single-blank SWAP (sliding) puzzle and return an admissible
+    graph-Manhattan heuristic h(states)->np.ndarray, else None.
+
+    Signature: exactly one EMPTY cell, distinct NUM pieces, each move swaps the
+    blank with a neighbour. Then each move displaces exactly one piece by one
+    edge of the cell-adjacency graph, so summing each piece's graph distance to
+    its goal cell is admissible -> A* finds OPTIMAL (shortest) solutions.
+    Returns None for anything else (rotation/color/multi-blank) -> no misfire.
+    """
+    try:
+        import collections
+        env.reset()
+        enc = env.encode_state()
+        ct, cv = enc["content_types"], enc["content_values"]
+        tt, tv = enc["target_types"], enc["target_values"]
+        N = len(ct)
+        if N == 0 or N > 4096:
+            return None
+        if sum(1 for t in ct if t == _C_EMPTY) != 1:
+            return None
+        piece_vals = [cv[i] for i in range(N) if ct[i] == _C_NUM]
+        if not piece_vals or len(set(piece_vals)) != len(piece_vals):
+            return None
+        goal_cell = {tv[i]: i for i in range(N) if tt[i] == _C_NUM}
+        if any(v not in goal_cell for v in piece_vals):
+            return None
+
+        def blank_of(e):
+            for i, t in enumerate(e["content_types"]):
+                if t == _C_EMPTY:
+                    return i
+            return None
+
+        # Discover cell adjacency: each move shifts the blank to a neighbour.
+        adj = collections.defaultdict(set)
+        rng = random.Random(0)
+        env.reset()
+        cur = blank_of(env.encode_state())
+        for _ in range(4000):
+            valid = env.valid_actions()
+            if not valid:
+                break
+            env.step(rng.choice(valid))
+            nb = blank_of(env.encode_state())
+            if nb is None:
+                return None
+            if nb != cur:
+                adj[cur].add(nb)
+                adj[nb].add(cur)
+            cur = nb
+        if not adj:
+            return None
+
+        # All-pairs shortest path on the (small) cell graph.
+        dist = [[-1] * N for _ in range(N)]
+        for src in range(N):
+            d = dist[src]
+            d[src] = 0
+            q = collections.deque([src])
+            while q:
+                u = q.popleft()
+                for w in adj[u]:
+                    if d[w] < 0:
+                        d[w] = d[u] + 1
+                        q.append(w)
+
+        gc = dict(goal_cell)
+        env.reset()
+
+        def h_fn(states):
+            out = np.empty(len(states), dtype=np.float32)
+            for k, s in enumerate(states):
+                e = env.encode_state(s)
+                ec, ev = e["content_types"], e["content_values"]
+                tot = 0
+                for i in range(N):
+                    if ec[i] == _C_NUM:
+                        g = gc.get(ev[i])
+                        if g is not None:
+                            dd = dist[i][g]
+                            if dd > 0:
+                                tot += dd
+                out[k] = tot
+            return out
+
+        return h_fn
+    except Exception:
+        return None
+
+
 def solve_bidirectional(
     env,
     initial_state: Any,
