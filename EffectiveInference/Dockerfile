@@ -6,7 +6,8 @@ RUN apt-get update && apt-get install -y build-essential
 
 RUN pip3 install --no-cache-dir \
     "vllm==0.11.0" \
-    "transformers==4.56.1"
+    "transformers==4.56.1" \
+    "scikit-learn==1.5.2"
 
 WORKDIR /workspace
 COPY . .

@@ -12,6 +12,13 @@ class SchoolQAEngine:
     def __init__(self, config: InferenceConfig) -> None:
         self.config = config
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_dir, use_fast=True)
+        self.retriever = None
+        if config.dynamic_few_shot:
+            try:
+                from source.retriever import FewShotRetriever, default_pool_path
+                self.retriever = FewShotRetriever(default_pool_path())
+            except Exception as e:  # пул/sklearn недоступны → откатываемся на статику
+                print(f"[retriever disabled: {e}] fallback to static few-shot")
         self.llm = LLM(
             model=config.model_dir,
             dtype="bfloat16",
@@ -28,24 +35,36 @@ class SchoolQAEngine:
             top_k=-1,
         )
 
-    def _build_prompts(self, questions: list[str]) -> list[str]:
-        # system + few-shot примеры (как реальные реплики) + сам вопрос.
-        # Общий префикс одинаков для всех запросов → кэшируется prefix caching.
-        few_shot_msgs = []
-        for q, a in self.config.few_shot:
-            few_shot_msgs.append({"role": "user", "content": q})
-            few_shot_msgs.append({"role": "assistant", "content": a})
-        return [
-            self.tokenizer.apply_chat_template(
-                [{"role": "system", "content": self.config.system_prompt}]
-                + few_shot_msgs
-                + [{"role": "user", "content": question}],
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
+    def _few_shot_for(self, question: str) -> list[tuple[str, str]]:
+        """Динамический few-shot (похожие из пула) или статический фолбэк."""
+        if self.retriever is not None:
+            hits = self.retriever.topk(
+                question,
+                k=self.config.few_shot_k,
+                max_answer_chars=self.config.few_shot_max_answer_chars,
             )
-            for question in questions
-        ]
+            if hits:
+                return hits
+        return self.config.few_shot
+
+    def _build_prompts(self, questions: list[str]) -> list[str]:
+        prompts = []
+        for question in questions:
+            few_shot_msgs = []
+            for q, a in self._few_shot_for(question):
+                few_shot_msgs.append({"role": "user", "content": q})
+                few_shot_msgs.append({"role": "assistant", "content": a})
+            prompts.append(
+                self.tokenizer.apply_chat_template(
+                    [{"role": "system", "content": self.config.system_prompt}]
+                    + few_shot_msgs
+                    + [{"role": "user", "content": question}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            )
+        return prompts
 
     def generate(self, rows: list[dict]) -> list[dict]:
         prompts = self._build_prompts([row["question"] for row in rows])

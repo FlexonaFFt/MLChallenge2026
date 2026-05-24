@@ -15,6 +15,7 @@ from common import state_key
 from model import ValueNet
 from search import (
     solve_astar, solve_bidirectional, build_linear_solver, build_manhattan_h,
+    make_misplaced_h,
 )
 
 
@@ -71,8 +72,11 @@ def _init_worker(budget: float, global_deadline: float):
     model = load_model()
     _W["env"] = env
     _W["solved_state"] = common.to_jsonable(env.get_state())
-    _W["solved_k"] = state_key(env.get_state())
     _W["v_fn"] = make_v_fn(env, model)
+    # Cheap misplaced-count heuristic: faster than the NN and empirically a
+    # better A* guide on rotation/permutation puzzles. Used as the general
+    # A* heuristic (toggle->GF2 and sliding->Manhattan paths are unaffected).
+    _W["cheap_h"] = make_misplaced_h(env)
     _W["budget"] = budget
     _W["gdl"] = global_deadline
     _W["w"] = float(os.environ.get("ASTAR_WEIGHT", "1.0"))
@@ -99,7 +103,7 @@ def _solve_one(inst):
         # heuristic (optimal, far stronger than the learned net here).
         if sol is None and _W["slide_h"] is not None:
             sol = solve_astar(
-                _W["env"], inst["state"], _W["solved_k"], _W["slide_h"],
+                _W["env"], inst["state"], _W["solved_state"], _W["slide_h"],
                 inst_deadline, max_nodes=2_000_000, weight=1.0,
             )
         # Phase 1: bidirectional BFS (shortest path -> best ratio). Give it most
@@ -111,7 +115,7 @@ def _solve_one(inst):
             )
         if sol is None:
             sol = solve_astar(
-                _W["env"], inst["state"], _W["solved_k"], _W["v_fn"], inst_deadline,
+                _W["env"], inst["state"], _W["solved_state"], _W["cheap_h"], inst_deadline,
                 weight=_W["w"],
             )
     except Exception as e:

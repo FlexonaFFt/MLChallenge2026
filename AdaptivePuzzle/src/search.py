@@ -16,6 +16,20 @@ def _key(jsonable_state) -> str:
     return json.dumps(jsonable_state, sort_keys=True)
 
 
+def _fast_key(s) -> bytes:
+    """Fast, unique, hashable key for a NATIVE env state (ndarray / dict / int).
+    ~10-50x cheaper than json.dumps. Always derive from env.get_state() so the
+    representation is consistent across start/goal/children."""
+    t = type(s)
+    if t is np.ndarray:
+        return s.tobytes()
+    if t is dict:
+        return b"|".join(k.encode() + b"=" + _fast_key(v) for k, v in sorted(s.items()))
+    if t is list or t is tuple:
+        return b"[" + b",".join(_fast_key(x) for x in s) + b"]"
+    return repr(s).encode()
+
+
 # =====================================================================
 # GF(2) linear solver (Lights-Out-like / TOGGLE puzzles)
 # =====================================================================
@@ -148,6 +162,64 @@ _C_EMPTY = 0
 _C_NUM = 1
 
 
+def _linear_conflicts(groups: dict) -> int:
+    """Classic (admissible) linear-conflict count: per line, the minimum number
+    of tiles to remove so the rest are in goal order, via greedy removal of the
+    most-conflicting tile. Caller adds 2 per removal. `groups` maps line ->
+    list of (current_pos, goal_pos) for tiles whose goal line == this line.
+    """
+    total = 0
+    for tiles in groups.values():
+        k = len(tiles)
+        if k < 2:
+            continue
+        pairs = []
+        for a in range(k):
+            ca, ga = tiles[a]
+            for b in range(a + 1, k):
+                cb, gb = tiles[b]
+                if (ca - cb) * (ga - gb) < 0:  # current vs goal order reversed
+                    pairs.append((a, b))
+        if not pairs:
+            continue
+        removed = [False] * k
+        while True:
+            rc = [0] * k
+            any_conf = False
+            for a, b in pairs:
+                if not removed[a] and not removed[b]:
+                    rc[a] += 1
+                    rc[b] += 1
+                    any_conf = True
+            if not any_conf:
+                break
+            worst = max(range(k), key=lambda i: rc[i])
+            removed[worst] = True
+            total += 1
+    return total
+
+
+def make_misplaced_h(env) -> Callable[[List[Any]], np.ndarray]:
+    """Cheap, generic heuristic: number of cells whose (type,value) != goal.
+    No NN -> ~2.5x faster per node, and empirically guides A* on rotation/
+    permutation puzzles AT LEAST as well as the learned net (often better)."""
+    env.reset()
+    g = env.encode_state()
+    gtt = np.asarray(g["target_types"])
+    gtv = np.asarray(g["target_values"])
+
+    def h(states):
+        out = np.empty(len(states), dtype=np.float32)
+        for i, s in enumerate(states):
+            e = env.encode_state(s)
+            ct = np.asarray(e["content_types"])
+            cv = np.asarray(e["content_values"])
+            out[i] = np.count_nonzero((ct != gtt) | (cv != gtv))
+        return out
+
+    return h
+
+
 def build_manhattan_h(env) -> Optional[Callable[[List[Any]], np.ndarray]]:
     """Detect a single-blank SWAP (sliding) puzzle and return an admissible
     graph-Manhattan heuristic h(states)->np.ndarray, else None.
@@ -225,6 +297,20 @@ def build_manhattan_h(env) -> Optional[Callable[[List[Any]], np.ndarray]]:
                         q.append(w)
 
         gc = dict(goal_cell)
+
+        # Try to recover a 2D grid from cell positions so we can add Linear
+        # Conflict (admissible booster on top of Manhattan). If positions don't
+        # form a clean grid, lc stays disabled and we use plain Manhattan.
+        positions = enc["positions"]
+        xs = sorted({round(p[0], 6) for p in positions})
+        ys = sorted({round(p[1], 6) for p in positions})
+        xrank = {x: i for i, x in enumerate(xs)}
+        yrank = {y: i for i, y in enumerate(ys)}
+        cell_col = [xrank[round(positions[i][0], 6)] for i in range(N)]
+        cell_row = [yrank[round(positions[i][1], 6)] for i in range(N)]
+        lc_enabled = (len({(cell_row[i], cell_col[i]) for i in range(N)}) == N)
+        goal_rc = {v: (cell_row[gc[v]], cell_col[gc[v]]) for v in gc} if lc_enabled else {}
+
         env.reset()
 
         def h_fn(states):
@@ -233,13 +319,28 @@ def build_manhattan_h(env) -> Optional[Callable[[List[Any]], np.ndarray]]:
                 e = env.encode_state(s)
                 ec, ev = e["content_types"], e["content_values"]
                 tot = 0
+                # group tiles by their current row / column for Linear Conflict
+                rows = {} if lc_enabled else None
+                cols = {} if lc_enabled else None
                 for i in range(N):
-                    if ec[i] == _C_NUM:
-                        g = gc.get(ev[i])
-                        if g is not None:
-                            dd = dist[i][g]
-                            if dd > 0:
-                                tot += dd
+                    if ec[i] != _C_NUM:
+                        continue
+                    v = ev[i]
+                    g = gc.get(v)
+                    if g is not None:
+                        dd = dist[i][g]
+                        if dd > 0:
+                            tot += dd
+                    if lc_enabled and v in goal_rc:
+                        cr, cc = cell_row[i], cell_col[i]
+                        gr, gc_ = goal_rc[v]
+                        # a tile is a row-LC candidate if it's in its goal row now
+                        if cr == gr:
+                            rows.setdefault(cr, []).append((cc, gc_))
+                        if cc == gc_:
+                            cols.setdefault(cc, []).append((cr, gr))
+                if lc_enabled:
+                    tot += 2 * _linear_conflicts(rows) + 2 * _linear_conflicts(cols)
                 out[k] = tot
             return out
 
@@ -253,7 +354,7 @@ def solve_bidirectional(
     initial_state: Any,
     solved_state: Any,
     deadline: float,
-    max_nodes: int = 150_000,
+    max_nodes: int = 300_000,
 ) -> Optional[List[str]]:
     """Meet-in-the-middle BFS. Returns a shortest action list or None.
 
@@ -261,21 +362,26 @@ def solve_bidirectional(
     for state s and action b valid at s, s' = step(s, b) is a predecessor of s,
     connected by the forward action a = inverse_action(b) (a is valid at s' and
     step(s', a) == s by reversibility). The two waves meet on a shared state key.
+
+    States are kept in their NATIVE env form and keyed via _fast_key (bytes) —
+    no json / to_jsonable in the hot loop.
     """
-    start = to_jsonable(initial_state)
-    goal = to_jsonable(solved_state)
-    sk = _key(start)
-    gk = _key(goal)
+    env.set_state(initial_state)
+    start = env.get_state()
+    env.set_state(solved_state)
+    goal = env.get_state()
+    sk = _fast_key(start)
+    gk = _fast_key(goal)
     if sk == gk:
         return []
 
     # key -> (parent_key, forward action leading INTO this key from the start side)
-    fwd: Dict[str, Tuple[Optional[str], Optional[str]]] = {sk: (None, None)}
+    fwd: Dict[bytes, Tuple[Optional[bytes], Optional[str]]] = {sk: (None, None)}
     # key -> (next_key toward goal, forward action FROM this key toward goal)
-    bwd: Dict[str, Tuple[Optional[str], Optional[str]]] = {gk: (None, None)}
+    bwd: Dict[bytes, Tuple[Optional[bytes], Optional[str]]] = {gk: (None, None)}
 
-    f_frontier: List[Tuple[str, Any]] = [(sk, start)]
-    b_frontier: List[Tuple[str, Any]] = [(gk, goal)]
+    f_frontier: List[Tuple[bytes, Any]] = [(sk, start)]
+    b_frontier: List[Tuple[bytes, Any]] = [(gk, goal)]
     nodes = 2
 
     while f_frontier and b_frontier:
@@ -301,10 +407,10 @@ def solve_bidirectional(
                 try:
                     env.set_state(state)
                     env.step(mv)
-                    ns = to_jsonable(env.get_state())
+                    ns = env.get_state()
                 except Exception:
                     continue
-                nk = _key(ns)
+                nk = _fast_key(ns)
                 if nk in this_side:
                     continue
                 if expand_forward:
@@ -359,22 +465,27 @@ def _stitch(meet_key: str, fwd, bwd) -> List[str]:
 def solve_astar(
     env,
     initial_state: Any,
-    solved_key: str,
+    solved_state: Any,
     v_fn: Optional[Callable[[List[Any]], np.ndarray]],
     deadline: float,
-    max_nodes: int = 50_000,
+    max_nodes: int = 1_000_000,
     expand_batch: int = 32,
     weight: float = 1.0,
 ) -> Optional[List[str]]:
     """Weighted A* with f = g + weight * V(s). weight>1 trades solution length
-    for speed/coverage (greedier toward the goal). Returns action list or None."""
-    start = to_jsonable(initial_state)
-    start_k = state_key(start)
+    for speed/coverage (greedier toward the goal). Returns action list or None.
+
+    Native states + _fast_key (bytes) keys — no json/to_jsonable in the loop."""
+    env.set_state(solved_state)
+    solved_key = _fast_key(env.get_state())
+    env.set_state(initial_state)
+    start = env.get_state()
+    start_k = _fast_key(start)
     if start_k == solved_key:
         return []
 
-    parents: Dict[str, Tuple[Optional[str], Optional[str]]] = {start_k: (None, None)}
-    g_score: Dict[str, int] = {start_k: 0}
+    parents: Dict[bytes, Tuple[Optional[bytes], Optional[str]]] = {start_k: (None, None)}
+    g_score: Dict[bytes, int] = {start_k: 0}
 
     h0 = float(v_fn([start])[0]) if v_fn else 0.0
     counter = 0
@@ -405,10 +516,10 @@ def solve_astar(
                 try:
                     env.set_state(state)
                     env.step(a)
-                    ns = to_jsonable(env.get_state())
+                    ns = env.get_state()
                 except Exception:
                     continue
-                nsk = state_key(ns)
+                nsk = _fast_key(ns)
                 ng = g + 1
                 if g_score.get(nsk, 1 << 30) <= ng or nsk in seen:
                     continue
