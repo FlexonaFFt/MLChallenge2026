@@ -12,9 +12,7 @@
 """
 from huggingface_hub import snapshot_download
 
-# Целевая (8B AWQ) + черновик для speculative decoding (0.6B, тот же токенайзер Qwen3).
-TARGET_REPO = "Qwen/Qwen3-8B-AWQ"
-DRAFT_REPO = "Qwen/Qwen3-0.6B"
+TARGET_REPO = "Qwen/Qwen3-4B-AWQ"
 
 PATTERNS = ["*.json", "*.safetensors", "*.txt", "tokenizer*", "*.jinja"]
 
@@ -26,7 +24,6 @@ def dl(repo: str, out: str) -> None:
 
 def main() -> None:
     dl(TARGET_REPO, "weights")
-    dl(DRAFT_REPO, "draft")
 
 
 if __name__ == "__main__":

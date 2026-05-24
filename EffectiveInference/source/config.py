@@ -63,18 +63,53 @@ FEW_SHOT: list[tuple[str, str]] = [
     ),
 ]
 
+# Few-shot по категориям: ~6 распределений → каждое кэшируется один раз
+# (в отличие от per-question few-shot, который убивал prefix caching → TL).
+_MATH = FEW_SHOT[0]
+_MORPH = FEW_SHOT[1]
+_CHEM = FEW_SHOT[2]
+_ENG = FEW_SHOT[3]
+_PHYS = (
+    "Скорость волны 16 м/с, расстояние между гребнями 4 м. Найдите длину волны.",
+    "Длина волны — это расстояние между соседними гребнями.\n\n"
+    "По условию оно равно $4$ м.\n\n**Ответ:** $\\lambda = 4$ м.",
+)
+_GRAMMAR = (
+    "Укажи род и нужен ли мягкий знак: полночь, манеж, скрипач.",
+    "- **полночь** — женский род (мягкий знак нужен);\n"
+    "- **манеж** — мужской род (мягкий знак не нужен);\n"
+    "- **скрипач** — мужской род (мягкий знак не нужен).",
+)
+_ESSAY = (
+    "Напиши сочинение из трёх предложений о картине «Грачи прилетели».",
+    "Алексей Кондратьевич Саврасов — известный русский художник-пейзажист. "
+    "Он любил изображать природу родной России в разные времена года. "
+    "Картина «Грачи прилетели» стала символом русской весны.",
+)
+
+FEW_SHOT_BY_CATEGORY: dict[str, list[tuple[str, str]]] = {
+    "math": [_MATH],
+    "morphology": [_MORPH],
+    "chemistry": [_CHEM],
+    "english": [_ENG],
+    "physics": [_PHYS],
+    "grammar": [_GRAMMAR],
+    "essay": [_ESSAY],
+    "default": [_MATH, _MORPH],
+}
+
 
 @dataclass
 class InferenceConfig:
     model_dir: str = "./weights"
-    max_new_tokens: int = 512   # ниже кэп → запас по времени для 8B (де-риск TL)
-    max_model_len: int = 2048   # ~950 префикс + 512 генерация < 2048
+    max_new_tokens: int = 768
+    max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
     temperature: float = 0.0
     dtype: str = "float16"   # AWQ-модель → fp16 compute (для bf16-модели ставить "bfloat16")
-    # Speculative decoding: черновик 0.6B ускоряет декод 8B (то же качество).
-    # "" — выключить. num_speculative_tokens — сколько токенов предлагает черновик.
-    spec_draft_model: str = "./draft"
+    # Speculative decoding отключён: vLLM 0.11 (v1) НЕ поддерживает draft-model spec
+    # (только ngram/eagle/mtp или env VLLM_USE_V1=0). "" — выключено.
+    spec_draft_model: str = ""
     num_speculative_tokens: int = 5
     system_prompt: str = field(default=SYSTEM_PROMPT)
     few_shot: list[tuple[str, str]] = field(default_factory=lambda: FEW_SHOT)
@@ -84,4 +119,8 @@ class InferenceConfig:
     few_shot_k: int = 2                      # сколько примеров подставлять
     few_shot_max_answer_chars: int = 900     # кап длины примера (ограничить префикс/время)
     enable_prefix_caching: bool = True
+    # --- no-GPU комбо ---
+    enable_shortcut: bool = True             # точное совпадение запроса → отдать эталон (без модели)
+    enable_category_fewshot: bool = True     # few-shot по категории вопроса (timing-safe, ~6 префиксов)
+    enable_postprocess: bool = True          # чистка вывода под формат эталона
     max_num_seqs: int = 256
