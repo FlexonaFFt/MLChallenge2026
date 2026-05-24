@@ -47,6 +47,18 @@ class SchoolQAEngine:
                 return hits
         return self.config.few_shot
 
+    def _apply_template(self, messages: list[dict]) -> str:
+        # non-thinking модели (Instruct-2507) могут не принимать enable_thinking.
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+
     def _build_prompts(self, questions: list[str]) -> list[str]:
         prompts = []
         for question in questions:
@@ -55,13 +67,10 @@ class SchoolQAEngine:
                 few_shot_msgs.append({"role": "user", "content": q})
                 few_shot_msgs.append({"role": "assistant", "content": a})
             prompts.append(
-                self.tokenizer.apply_chat_template(
+                self._apply_template(
                     [{"role": "system", "content": self.config.system_prompt}]
                     + few_shot_msgs
-                    + [{"role": "user", "content": question}],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
+                    + [{"role": "user", "content": question}]
                 )
             )
         return prompts
