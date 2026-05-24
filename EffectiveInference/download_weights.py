@@ -13,7 +13,7 @@
 from huggingface_hub import snapshot_download
 
 
-REPO_ID = "Qwen/Qwen3-1.7B"
+REPO_ID = "Qwen/Qwen3-4B-AWQ"
 LOCAL_DIR = "weights"
 
 

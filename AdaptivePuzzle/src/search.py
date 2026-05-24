@@ -199,17 +199,48 @@ def _linear_conflicts(groups: dict) -> int:
     return total
 
 
+def _flatten_state(s) -> np.ndarray:
+    """Flatten a NATIVE env state to a 1-D int array for cheap comparison."""
+    if isinstance(s, np.ndarray):
+        return s.ravel()
+    if isinstance(s, dict):
+        parts = [_flatten_state(s[k]) for k in sorted(s)]
+        return np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
+    if isinstance(s, (list, tuple)):
+        parts = [_flatten_state(x) for x in s]
+        return np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
+    return np.array([s])
+
+
 def make_misplaced_h(env) -> Callable[[List[Any]], np.ndarray]:
-    """Cheap, generic heuristic: number of cells whose (type,value) != goal.
-    No NN -> ~2.5x faster per node, and empirically guides A* on rotation/
-    permutation puzzles AT LEAST as well as the learned net (often better)."""
+    """Cheap, generic heuristic: number of cells differing from the goal.
+    Primary path flattens the NATIVE state and compares to the goal vector
+    (~2.25x faster than going through encode_state). Falls back to an
+    encode_state comparison if a state can't be flattened consistently.
+    No NN -> guides A* on rotation/permutation puzzles at least as well."""
     env.reset()
-    g = env.encode_state()
-    gtt = np.asarray(g["target_types"])
-    gtv = np.asarray(g["target_values"])
+    g_enc = env.encode_state()
+    gtt = np.asarray(g_enc["target_types"])
+    gtv = np.asarray(g_enc["target_values"])
+    try:
+        goal_flat = _flatten_state(env.get_state()).astype(np.int64)
+        use_fast = goal_flat.size > 0
+    except Exception:
+        goal_flat = None
+        use_fast = False
 
     def h(states):
         out = np.empty(len(states), dtype=np.float32)
+        if use_fast:
+            try:
+                for i, s in enumerate(states):
+                    f = _flatten_state(s).astype(np.int64)
+                    if f.shape != goal_flat.shape:
+                        raise ValueError("shape mismatch")
+                    out[i] = np.count_nonzero(f != goal_flat)
+                return out
+            except Exception:
+                pass  # fall through to the robust encode_state path
         for i, s in enumerate(states):
             e = env.encode_state(s)
             ct = np.asarray(e["content_types"])
@@ -460,6 +491,101 @@ def _stitch(meet_key: str, fwd, bwd) -> List[str]:
         cur = nk
 
     return head + tail
+
+
+def _misplaced_vs(env, state, ref_types, ref_vals) -> int:
+    e = env.encode_state(state)
+    ct = np.asarray(e["content_types"])
+    cv = np.asarray(e["content_values"])
+    return int(np.count_nonzero((ct != ref_types) | (cv != ref_vals)))
+
+
+def solve_bidir_astar(
+    env,
+    initial_state: Any,
+    solved_state: Any,
+    deadline: float,
+    max_nodes: int = 2_000_000,
+    weight: float = 2.0,
+) -> Optional[List[str]]:
+    """Informed meet-in-the-middle: two best-first waves (f = g + weight*h),
+    forward guided toward the goal, backward toward the start, both using the
+    cheap misplaced-count heuristic. Halves effective search depth (d -> d/2),
+    which is what unidirectional A* lacks on deep rotation puzzles.
+
+    Backward expansion uses inverse actions (reversibility). Native states +
+    _fast_key. Returns an action list or None."""
+    env.set_state(initial_state)
+    start = env.get_state()
+    senc = env.encode_state(start)
+    start_t = np.asarray(senc["content_types"]); start_v = np.asarray(senc["content_values"])
+    env.set_state(solved_state)
+    goal = env.get_state()
+    genc = env.encode_state(goal)
+    goal_t = np.asarray(genc["target_types"]); goal_v = np.asarray(genc["target_values"])
+
+    sk = _fast_key(start)
+    gk = _fast_key(goal)
+    if sk == gk:
+        return []
+
+    fwd: Dict[bytes, Tuple[Optional[bytes], Optional[str]]] = {sk: (None, None)}
+    bwd: Dict[bytes, Tuple[Optional[bytes], Optional[str]]] = {gk: (None, None)}
+    cf = cb = 0
+    # heaps: (f, counter, g, key, state)
+    f_heap = [(0.0, 0, 0, sk, start)]
+    b_heap = [(0.0, 0, 0, gk, goal)]
+    nodes = 2
+
+    while f_heap and b_heap:
+        if time.time() >= deadline or nodes >= max_nodes:
+            return None
+
+        forward = len(f_heap) <= len(b_heap)
+        heap = f_heap if forward else b_heap
+        this_side = fwd if forward else bwd
+        other_side = bwd if forward else fwd
+        _f, _c, g, key, state = heapq.heappop(heap)
+
+        try:
+            env.set_state(state)
+            valid = env.valid_actions()
+        except Exception:
+            continue
+        for mv in valid:
+            try:
+                env.set_state(state)
+                env.step(mv)
+                ns = env.get_state()
+            except Exception:
+                continue
+            nk = _fast_key(ns)
+            if nk in this_side:
+                continue
+            if forward:
+                this_side[nk] = (key, mv)
+                h = _misplaced_vs(env, ns, goal_t, goal_v)
+            else:
+                try:
+                    a = env.inverse_action(mv)
+                except Exception:
+                    continue
+                this_side[nk] = (key, a)
+                h = _misplaced_vs(env, ns, start_t, start_v)
+            nodes += 1
+            if nk in other_side:
+                return _stitch(nk, fwd, bwd)
+            ng = g + 1
+            if forward:
+                cf += 1
+                heapq.heappush(f_heap, (ng + weight * h, cf, ng, nk, ns))
+            else:
+                cb += 1
+                heapq.heappush(b_heap, (ng + weight * h, cb, ng, nk, ns))
+            if nodes >= max_nodes:
+                return None
+
+    return None
 
 
 def solve_astar(

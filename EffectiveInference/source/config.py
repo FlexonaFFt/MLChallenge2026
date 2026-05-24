@@ -71,6 +71,7 @@ class InferenceConfig:
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
     temperature: float = 0.0
+    dtype: str = "float16"   # AWQ-модель → fp16 compute (для bf16-модели ставить "bfloat16")
     system_prompt: str = field(default=SYSTEM_PROMPT)
     few_shot: list[tuple[str, str]] = field(default_factory=lambda: FEW_SHOT)
     # Динамический few-shot убивает prefix caching → 22 мин на 4000 (TL). ВЫКЛ.

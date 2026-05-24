@@ -21,7 +21,7 @@ class SchoolQAEngine:
                 print(f"[retriever disabled: {e}] fallback to static few-shot")
         self.llm = LLM(
             model=config.model_dir,
-            dtype="bfloat16",
+            dtype=config.dtype,
             max_model_len=config.max_model_len,
             gpu_memory_utilization=config.gpu_memory_utilization,
             tokenizer_mode="auto",
