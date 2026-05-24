@@ -15,8 +15,11 @@ from common import state_key
 from model import ValueNet
 from search import (
     solve_astar, solve_bidirectional, build_linear_solver, build_manhattan_h,
-    make_misplaced_h,
+    make_misplaced_h, solve_with_table, BackwardTable,
 )
+
+
+TABLE_PATH = "btable.npz"
 
 
 TIME_LIMIT_DEFAULT = 25 * 60
@@ -86,6 +89,9 @@ def _init_worker(budget: float, global_deadline: float):
     # Detect a single-blank sliding puzzle once; if so use an admissible
     # graph-Manhattan heuristic in A* (optimal, strong) instead of the net.
     _W["slide_h"] = None if _W["lin"] is not None else build_manhattan_h(env)
+    # Backward distance table built in train.py (BFS from goal). If present,
+    # forward-search into it + descend -> optimal solutions, cracks deep ones.
+    _W["table"] = BackwardTable.load(TABLE_PATH)
 
 
 def _solve_one(inst):
@@ -105,6 +111,16 @@ def _solve_one(inst):
             sol = solve_astar(
                 _W["env"], inst["state"], _W["solved_state"], _W["slide_h"],
                 inst_deadline, max_nodes=2_000_000, weight=1.0,
+            )
+        # Phase 0.7: forward-search into the precomputed backward table, then
+        # descend it to the goal (optimal; cracks deep instances). Primary for
+        # rotation/permutation puzzles when a table was built in train.
+        if sol is None and _W["table"] is not None:
+            # half the remaining budget; if the table misses, bidi/A* still run
+            table_deadline = now + 0.5 * (inst_deadline - now)
+            sol = solve_with_table(
+                _W["env"], inst["state"], _W["solved_state"], _W["table"],
+                _W["cheap_h"], table_deadline,
             )
         # Phase 1: bidirectional BFS (shortest path -> best ratio). Give it most
         # of the per-instance budget, then fall back to V-guided A*.

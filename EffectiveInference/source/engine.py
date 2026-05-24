@@ -19,7 +19,7 @@ class SchoolQAEngine:
                 self.retriever = FewShotRetriever(default_pool_path())
             except Exception as e:  # пул/sklearn недоступны → откатываемся на статику
                 print(f"[retriever disabled: {e}] fallback to static few-shot")
-        self.llm = LLM(
+        llm_kwargs: dict = dict(
             model=config.model_dir,
             dtype=config.dtype,
             max_model_len=config.max_model_len,
@@ -29,6 +29,13 @@ class SchoolQAEngine:
             max_num_seqs=config.max_num_seqs,
             seed=0,
         )
+        if config.spec_draft_model:
+            llm_kwargs["speculative_config"] = {
+                "method": "draft_model",
+                "model": config.spec_draft_model,
+                "num_speculative_tokens": config.num_speculative_tokens,
+            }
+        self.llm = LLM(**llm_kwargs)
         self.sampling_params = SamplingParams(
             temperature=config.temperature,
             max_tokens=config.max_new_tokens,

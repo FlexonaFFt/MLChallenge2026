@@ -1,5 +1,6 @@
 """Search: GF(2) linear solver + bidirectional BFS + forward A* with V heuristic."""
 
+import hashlib
 import heapq
 import json
 import random
@@ -9,6 +10,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from common import state_key, to_jsonable
+
+
+def state_hash(s) -> int:
+    """Stable 64-bit hash of a native env state (consistent ACROSS processes,
+    unlike Python's randomized hash). Used as the key in the backward table."""
+    return int.from_bytes(hashlib.blake2b(_fast_key(s), digest_size=8).digest(), "big")
 
 
 def _key(jsonable_state) -> str:
@@ -676,7 +683,7 @@ def solve_astar(
     return None
 
 
-def _reconstruct(end_k: str, parents) -> List[str]:
+def _reconstruct(end_k, parents) -> List[str]:
     actions = []
     cur = end_k
     while True:
@@ -687,3 +694,164 @@ def _reconstruct(end_k: str, parents) -> List[str]:
         cur = pk
     actions.reverse()
     return actions
+
+
+# ---------------------------------------------------------------------------
+# Backward distance table ("precomputed backward half"): BFS from the goal in
+# TRAIN, storing exact distance-to-goal for every state within reach. In SOLVE
+# we forward-search until we hit a table state, then descend the table to the
+# goal -> optimal solutions that crack deep instances unidirectional A* can't.
+# Generic (uses env.step / valid_actions / get_state) and reuses the otherwise
+# idle 50-min train budget.
+# ---------------------------------------------------------------------------
+
+def build_backward_table(env, solved_state, deadline, max_states=40_000_000):
+    """BFS outward from the goal. Returns dict {state_hash: depth}."""
+    env.set_state(solved_state)
+    goal = env.get_state()
+    table = {state_hash(goal): 0}
+    frontier = [goal]
+    depth = 0
+    while frontier and time.time() < deadline and len(table) < max_states:
+        depth += 1
+        nxt = []
+        for st in frontier:
+            try:
+                env.set_state(st)
+                valid = env.valid_actions()
+            except Exception:
+                continue
+            for a in valid:
+                try:
+                    env.set_state(st)
+                    env.step(a)
+                    ns = env.get_state()
+                except Exception:
+                    continue
+                h = state_hash(ns)
+                if h not in table:
+                    table[h] = depth
+                    nxt.append(ns)
+                    if len(table) >= max_states:
+                        break
+            if len(table) >= max_states or time.time() >= deadline:
+                break
+        frontier = nxt
+    return table, depth
+
+
+def save_backward_table(table: dict, path: str):
+    """Store as sorted uint64 hashes + uint8 depths (compact, fast to load,
+    cheap per-worker memory vs a Python dict)."""
+    keys = np.fromiter(table.keys(), dtype=np.uint64, count=len(table))
+    depths = np.fromiter(table.values(), dtype=np.uint16, count=len(table))
+    order = np.argsort(keys)
+    np.savez(path, keys=keys[order], depths=depths[order].astype(np.uint16))
+
+
+class BackwardTable:
+    """Compact, process-local lookup over sorted hash keys (binary search)."""
+
+    def __init__(self, keys: np.ndarray, depths: np.ndarray):
+        self.keys = keys
+        self.depths = depths
+
+    @classmethod
+    def load(cls, path: str) -> Optional["BackwardTable"]:
+        try:
+            d = np.load(path)
+            return cls(d["keys"], d["depths"])
+        except Exception:
+            return None
+
+    def get(self, h: int) -> int:
+        i = int(np.searchsorted(self.keys, np.uint64(h)))
+        if i < self.keys.size and int(self.keys[i]) == h:
+            return int(self.depths[i])
+        return -1
+
+
+def _descend_table(env, meet_state, table: "BackwardTable") -> Optional[List[str]]:
+    """From a state known to be in the table, greedily step to a depth-1
+    neighbour until the goal. Returns the forward actions meet->goal."""
+    acts: List[str] = []
+    cur = meet_state
+    d = table.get(state_hash(cur))
+    if d < 0:
+        return None
+    guard = 0
+    while d > 0:
+        env.set_state(cur)
+        moved = False
+        for a in env.valid_actions():
+            env.set_state(cur)
+            env.step(a)
+            ns = env.get_state()
+            if table.get(state_hash(ns)) == d - 1:
+                acts.append(a)
+                cur = ns
+                d -= 1
+                moved = True
+                break
+        if not moved:
+            return None
+        guard += 1
+        if guard > 100000:
+            return None
+    return acts
+
+
+def solve_with_table(
+    env, initial_state, solved_state, table: "BackwardTable",
+    h_fn, deadline: float, max_nodes: int = 3_000_000,
+) -> Optional[List[str]]:
+    """Forward weighted-A* (cheap heuristic) until a state is found in the
+    backward table, then descend the table to the goal. Returns actions/None."""
+    env.set_state(initial_state)
+    start = env.get_state()
+    if table.get(state_hash(start)) >= 0:
+        return _descend_table(env, start, table)
+
+    sk = _fast_key(start)
+    parents = {sk: (None, None)}
+    g = {sk: 0}
+    h0 = float(h_fn([start])[0]) if h_fn else 0.0
+    cnt = 0
+    heap = [(h0, 0, 0, sk, start)]
+
+    while heap:
+        if time.time() >= deadline or len(g) >= max_nodes:
+            return None
+        _f, _c, gg, k, st = heapq.heappop(heap)
+        try:
+            env.set_state(st)
+            valid = env.valid_actions()
+        except Exception:
+            continue
+        children = []
+        for a in valid:
+            try:
+                env.set_state(st)
+                env.step(a)
+                ns = env.get_state()
+            except Exception:
+                continue
+            nk = _fast_key(ns)
+            if nk in g:
+                continue
+            g[nk] = gg + 1
+            parents[nk] = (k, a)
+            if table.get(state_hash(ns)) >= 0:
+                fwd = _reconstruct(nk, parents)
+                tail = _descend_table(env, ns, table)
+                if tail is not None:
+                    return fwd + tail
+                # false hit (hash collision): keep searching
+            children.append((nk, ns))
+        if not children:
+            continue
+        hs = h_fn([c[1] for c in children]) if h_fn else np.zeros(len(children))
+        for (nk, ns), h in zip(children, hs):
+            cnt += 1
+            heapq.heappush(heap, (g[nk] + float(h), cnt, g[nk], nk, ns))
+    return None

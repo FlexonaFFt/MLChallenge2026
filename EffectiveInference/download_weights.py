@@ -12,24 +12,21 @@
 """
 from huggingface_hub import snapshot_download
 
+# Целевая (8B AWQ) + черновик для speculative decoding (0.6B, тот же токенайзер Qwen3).
+TARGET_REPO = "Qwen/Qwen3-8B-AWQ"
+DRAFT_REPO = "Qwen/Qwen3-0.6B"
 
-REPO_ID = "Eslzzyl/Qwen3-4B-Instruct-2507-AWQ"
-LOCAL_DIR = "weights"
+PATTERNS = ["*.json", "*.safetensors", "*.txt", "tokenizer*", "*.jinja"]
+
+
+def dl(repo: str, out: str) -> None:
+    path = snapshot_download(repo_id=repo, local_dir=out, allow_patterns=PATTERNS)
+    print(f"{repo} -> {path}")
 
 
 def main() -> None:
-    path = snapshot_download(
-        repo_id=REPO_ID,
-        local_dir=LOCAL_DIR,
-        allow_patterns=[
-            "*.json",          # config.json, tokenizer_config.json, generation_config.json, ...
-            "*.safetensors",   # веса
-            "*.txt",           # vocab, merges
-            "tokenizer*",      # tokenizer.json, tokenizer.model
-            "*.jinja",         # chat template
-        ],
-    )
-    print(f"weights downloaded to: {path}")
+    dl(TARGET_REPO, "weights")
+    dl(DRAFT_REPO, "draft")
 
 
 if __name__ == "__main__":

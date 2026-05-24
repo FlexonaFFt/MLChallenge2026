@@ -67,11 +67,15 @@ FEW_SHOT: list[tuple[str, str]] = [
 @dataclass
 class InferenceConfig:
     model_dir: str = "./weights"
-    max_new_tokens: int = 768
-    max_model_len: int = 4096
+    max_new_tokens: int = 512   # ниже кэп → запас по времени для 8B (де-риск TL)
+    max_model_len: int = 2048   # ~950 префикс + 512 генерация < 2048
     gpu_memory_utilization: float = 0.9
     temperature: float = 0.0
     dtype: str = "float16"   # AWQ-модель → fp16 compute (для bf16-модели ставить "bfloat16")
+    # Speculative decoding: черновик 0.6B ускоряет декод 8B (то же качество).
+    # "" — выключить. num_speculative_tokens — сколько токенов предлагает черновик.
+    spec_draft_model: str = "./draft"
+    num_speculative_tokens: int = 5
     system_prompt: str = field(default=SYSTEM_PROMPT)
     few_shot: list[tuple[str, str]] = field(default_factory=lambda: FEW_SHOT)
     # Динамический few-shot убивает prefix caching → 22 мин на 4000 (TL). ВЫКЛ.

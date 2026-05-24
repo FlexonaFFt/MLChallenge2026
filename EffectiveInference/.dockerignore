@@ -7,3 +7,5 @@ download_weights.py
 *.pyc
 .DS_Store
 weights/.cache/
+draft/.cache/
+dryrun.py
