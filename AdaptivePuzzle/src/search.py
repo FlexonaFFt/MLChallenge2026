@@ -722,7 +722,7 @@ def build_backward_table(env, solved_state, deadline, max_states=40_000_000,
     key safety guard: high-branching puzzles blow up memory fast, so we halt
     before OOM. A partial table is still EXACT for the states it contains."""
     if mem_cap_bytes is None:
-        mem_cap_bytes = int(float(os.environ.get("TABLE_MEM_CAP_GB", "14")) * (1024 ** 3))
+        mem_cap_bytes = int(float(os.environ.get("TABLE_MEM_CAP_GB", "22")) * (1024 ** 3))
     env.set_state(solved_state)
     goal = env.get_state()
     table = {state_hash(goal): 0}
@@ -756,7 +756,7 @@ def build_backward_table(env, solved_state, deadline, max_states=40_000_000,
                     table[h] = depth
                     nxt.append(ns)
                     since_check += 1
-                    if since_check >= 100_000:
+                    if since_check >= 20_000:
                         since_check = 0
                         if over_budget():
                             stop = True

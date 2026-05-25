@@ -105,6 +105,25 @@ FEW_SHOT_BY_CATEGORY: dict[str, list[tuple[str, str]]] = {
 }
 
 
+# Пер-категорийный бюджет токенов. Измерено на held-out (длины эталонов,
+# токенайзер Qwen): обрезка при едином капе 768 бьёт по длинным ответам —
+# essay (медиана эталона 873 ток!) и «свалке» default (p90≈890, 56% всех
+# вопросов). Короткие категории оставлены на 768: ответы и так кончаются на
+# EOS раньше, кап не связывает → подъём капа им не нужен, а понижение лишь
+# риск регрессии без выигрыша по времени. Лишний декод тратится только на тех
+# ответах, что реально длиннее 768 (~14%), и только до их естественной длины.
+CATEGORY_MAX_TOKENS: dict[str, int] = {
+    "essay": 1536,
+    "default": 1100,
+    "chemistry": 1100,
+    "grammar": 1100,
+    "physics": 1100,
+    "math": 768,
+    "morphology": 768,
+    "english": 768,
+}
+
+
 @dataclass
 class InferenceConfig:
     model_dir: str = "./weights"
@@ -130,3 +149,15 @@ class InferenceConfig:
     enable_category_fewshot: bool = True     # few-shot по категории вопроса (timing-safe, ~6 префиксов)
     enable_postprocess: bool = True          # чистка вывода под формат эталона
     max_num_seqs: int = 256
+    # --- пер-категорийный бюджет токенов (правит обрезку длинных ответов) ---
+    enable_dynamic_max_tokens: bool = True
+    category_max_tokens: dict[str, int] = field(
+        default_factory=lambda: dict(CATEGORY_MAX_TOKENS)
+    )
+    # --- wall-clock страховка от TL ---
+    # Генерим чанками; на дедлайне останавливаемся и добиваем остаток пустыми
+    # строками (по условию пустая строка лучше пропуска rid). Дедлайн считается
+    # от старта процесса (включая загрузку весов). 15-мин лимит → берём запас.
+    enable_wall_guard: bool = True
+    gen_budget_sec: float = 13.5 * 60        # переопределяется env GEN_BUDGET_SEC
+    gen_chunk_size: int = 512

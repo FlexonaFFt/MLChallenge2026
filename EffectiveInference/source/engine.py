@@ -1,5 +1,6 @@
 import os
 import re
+import time
 
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -55,6 +56,22 @@ class SchoolQAEngine:
             max_tokens=config.max_new_tokens,
             top_k=-1,
         )
+        self._sp_cache: dict[int, SamplingParams] = {}
+
+    def _sampling_for(self, max_tokens: int) -> SamplingParams:
+        sp = self._sp_cache.get(max_tokens)
+        if sp is None:
+            sp = SamplingParams(
+                temperature=self.config.temperature, max_tokens=max_tokens, top_k=-1
+            )
+            self._sp_cache[max_tokens] = sp
+        return sp
+
+    def _max_tokens_for(self, question: str) -> int:
+        if not self.config.enable_dynamic_max_tokens:
+            return self.config.max_new_tokens
+        cat = self._classify(question)
+        return self.config.category_max_tokens.get(cat, self.config.max_new_tokens)
 
     def _classify(self, question: str) -> str:
         for cat, rx in _CATEGORY_RULES:
@@ -103,7 +120,7 @@ class SchoolQAEngine:
             text = text[m.end():].lstrip()
         return text.strip()
 
-    def generate(self, rows: list[dict]) -> list[dict]:
+    def generate(self, rows: list[dict], start_time: float | None = None) -> list[dict]:
         answers: dict = {}
         model_rows = []
         for row in rows:
@@ -115,9 +132,38 @@ class SchoolQAEngine:
                 model_rows.append(row)
 
         if model_rows:
-            prompts = [self._build_prompt(r["question"]) for r in model_rows]
-            outputs = self.llm.generate(prompts, sampling_params=self.sampling_params)
-            for r, out in zip(model_rows, outputs):
-                answers[r["rid"]] = self._postprocess(out.outputs[0].text)
+            # каждому вопросу — свой бюджет токенов по категории; короткие вперёд,
+            # чтобы при срабатывании дедлайна успеть ответить на максимум вопросов.
+            items = [
+                (r, self._build_prompt(r["question"]), self._max_tokens_for(r["question"]))
+                for r in model_rows
+            ]
+            items.sort(key=lambda it: it[2])
+
+            t0 = start_time if start_time is not None else time.time()
+            deadline = t0 + self.config.gen_budget_sec
+            chunk = max(1, self.config.gen_chunk_size)
+            use_guard = self.config.enable_wall_guard
+
+            i = 0
+            stopped = False
+            while i < len(items):
+                if use_guard and time.time() >= deadline:
+                    stopped = True
+                    break
+                batch = items[i : i + chunk]
+                prompts = [p for _, p, _ in batch]
+                sps = [self._sampling_for(mt) for _, _, mt in batch]
+                outputs = self.llm.generate(prompts, sampling_params=sps)
+                for (r, _, _), out in zip(batch, outputs):
+                    answers[r["rid"]] = self._postprocess(out.outputs[0].text)
+                i += chunk
+
+            if stopped:
+                # остаток — пустые строки (по условию лучше пустого, чем пропуск rid)
+                for r, _, _ in items[i:]:
+                    answers.setdefault(r["rid"], "")
+                print(f"[wall-guard: stopped at {i}/{len(items)} model rows, "
+                      f"elapsed {time.time() - t0:.0f}s]")
 
         return [{"rid": row["rid"], "answer": answers[row["rid"]]} for row in rows]
