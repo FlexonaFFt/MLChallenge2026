@@ -1,0 +1,34 @@
+# Training image для пайплайна дообучения (НЕ посылка!). Запускается на
+# арендованном A5000 24GB, где ЕСТЬ интернет — базовые модели тянутся с HF.
+# Посылка остаётся отдельным лёгким офлайн-образом (../Dockerfile).
+#
+# Сборка (из папки EffectiveInference/):
+#   docker build -f effinf_dev/Dockerfile.train -t effinf-train .
+#
+# Запуск (монтируем effinf_dev как рабочую папку и persistent /work под чекпойнты):
+#   docker run --rm --gpus all \
+#     -e HF_HOME=/work/hf \
+#     -v "$PWD/effinf_dev":/app -v "$PWD/effinf_dev/work":/work \
+#     -w /app effinf-train bash run_pipeline.sh
+#
+# Стадии 1-2 (SFT, merge, AWQ) НЕ требуют vllm — он нужен только для генерации
+# кандидатов и судьи (стадии 3-4), которые гоняются в окружении посылки/vllm.
+FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-devel
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git build-essential && rm -rf /var/lib/apt/lists/*
+
+# Версии подобраны под Qwen3 (нужен transformers>=4.51) + LoRA/DPO + AWQ-квант.
+# autoawq собирает CUDA-расширения → нужен -devel базовый образ.
+RUN pip3 install --no-cache-dir \
+    "transformers==4.56.1" \
+    "peft==0.13.2" \
+    "trl==0.11.4" \
+    "datasets==3.0.1" \
+    "accelerate==1.0.1" \
+    "bitsandbytes==0.44.1" \
+    "autoawq==0.2.9" \
+    "pandas" "pyarrow"
+
+WORKDIR /app

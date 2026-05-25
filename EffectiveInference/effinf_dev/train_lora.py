@@ -26,10 +26,11 @@ import json
 
 import torch
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
 )
@@ -42,12 +43,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--variant", choices=["minimal", "rich"], required=True)
     p.add_argument("--train_jsonl", required=True)
     p.add_argument("--output_dir", required=True)
-    p.add_argument("--base_model", default="Qwen/Qwen3-1.7B")
+    p.add_argument("--base_model", default="Qwen/Qwen3-4B")
     p.add_argument("--eval_jsonl", default="", help="held-out для eval-loss (опц.)")
     p.add_argument("--eval_samples", type=int, default=300)
     p.add_argument("--resume", action="store_true",
                    help="докатить с последнего чекпоинта в output_dir после обрыва")
-    p.add_argument("--max_len", type=int, default=1024)
+    p.add_argument("--load_4bit", action="store_true",
+                   help="QLoRA: грузить базу в 4-bit (для 7-8B-учителя на 24GB)")
+    # 1024 РЕЗАЛ длинные эталоны (бывают >1700 ток) → терялась supervision по
+    # сочинениям/разборам. 2048 покрывает p99 и влезает на A5000 (LoRA, batch 1).
+    p.add_argument("--max_len", type=int, default=2048)
     p.add_argument("--epochs", type=float, default=2.0)
     p.add_argument(
         "--max_samples",
@@ -155,13 +160,24 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    quant_cfg = None
+    if args.load_4bit:
+        quant_cfg = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         torch_dtype=dtype,
         device_map="auto",
+        quantization_config=quant_cfg,
     )
     model.config.use_cache = False
     model.gradient_checkpointing_enable()
+    if args.load_4bit:
+        model = prepare_model_for_kbit_training(model)
     model.enable_input_require_grads()
 
     lora = LoraConfig(
