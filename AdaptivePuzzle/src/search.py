@@ -3,13 +3,22 @@
 import hashlib
 import heapq
 import json
+import os
 import random
+import resource
+import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from common import state_key, to_jsonable
+
+
+def _rss_bytes() -> int:
+    """Current process peak RSS in bytes (ru_maxrss is KB on Linux, bytes on macOS)."""
+    ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return ru if sys.platform == "darwin" else ru * 1024
 
 
 def state_hash(s) -> int:
@@ -705,16 +714,30 @@ def _reconstruct(end_k, parents) -> List[str]:
 # idle 50-min train budget.
 # ---------------------------------------------------------------------------
 
-def build_backward_table(env, solved_state, deadline, max_states=40_000_000):
-    """BFS outward from the goal. Returns dict {state_hash: depth}."""
+def build_backward_table(env, solved_state, deadline, max_states=40_000_000,
+                         mem_cap_bytes=None):
+    """BFS outward from the goal. Returns (dict {state_hash: depth}, max_depth).
+
+    Stops on: time deadline, max_states, OR a memory cap (RSS) — the last is the
+    key safety guard: high-branching puzzles blow up memory fast, so we halt
+    before OOM. A partial table is still EXACT for the states it contains."""
+    if mem_cap_bytes is None:
+        mem_cap_bytes = int(float(os.environ.get("TABLE_MEM_CAP_GB", "14")) * (1024 ** 3))
     env.set_state(solved_state)
     goal = env.get_state()
     table = {state_hash(goal): 0}
     frontier = [goal]
     depth = 0
-    while frontier and time.time() < deadline and len(table) < max_states:
+    since_check = 0
+
+    def over_budget():
+        return (time.time() >= deadline or len(table) >= max_states
+                or _rss_bytes() >= mem_cap_bytes)
+
+    while frontier and not over_budget():
         depth += 1
         nxt = []
+        stop = False
         for st in frontier:
             try:
                 env.set_state(st)
@@ -732,9 +755,13 @@ def build_backward_table(env, solved_state, deadline, max_states=40_000_000):
                 if h not in table:
                     table[h] = depth
                     nxt.append(ns)
-                    if len(table) >= max_states:
-                        break
-            if len(table) >= max_states or time.time() >= deadline:
+                    since_check += 1
+                    if since_check >= 100_000:
+                        since_check = 0
+                        if over_budget():
+                            stop = True
+                            break
+            if stop:
                 break
         frontier = nxt
     return table, depth
