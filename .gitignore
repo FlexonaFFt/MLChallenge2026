@@ -29,6 +29,7 @@ build/
 
 # Model weights directories
 weights/
+ECCV2022-RIFE/
 
 # Datasets and submissions
 dataset/
