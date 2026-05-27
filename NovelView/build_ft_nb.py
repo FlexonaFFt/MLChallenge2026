@@ -167,17 +167,17 @@ print(f'pretrained RIFE val PSNR = {base_psnr:.3f} dB')
 
 opt = torch.optim.AdamW(flownet.parameters(), lr=CFG['lr'], weight_decay=1e-4)
 sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=CFG['epochs'])
-scaler = torch.cuda.amp.GradScaler()
+# NOTE: train in fp32 (no AMP). RIFE's forward overflows under fp16 autocast ->
+# GradScaler skips every step -> weights never update (the "gain=+0.000" bug).
 best = base_psnr
 for ep in range(CFG['epochs']):
     flownet.train(); pbar=tqdm(tl, desc=f'epoch {ep}/{CFG["epochs"]-1}')
     for i0,i1,g in pbar:
         i0,i1,g = i0.to(device,non_blocking=True),i1.to(device,non_blocking=True),g.to(device,non_blocking=True)
         opt.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast():
-            pred = rife_forward(net, i0, i1).clamp(0,1)
-            loss = F.l1_loss(pred,g) + CFG['ssim_w']*(1-ssim(pred,g))
-        scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
+        pred = rife_forward(net, i0, i1)            # no clamp -> keep gradients
+        loss = F.l1_loss(pred,g) + CFG['ssim_w']*(1-ssim(pred.clamp(0,1),g))
+        loss.backward(); opt.step()
         pbar.set_postfix(loss=f'{loss.item():.4f}')
     sch.step()
     vp = val_psnr(net)
@@ -195,36 +195,43 @@ if os.path.exists('/kaggle/working/flownet_ft.pkl'):
 flownet.eval()
 
 @torch.no_grad()
-def ft_rife(i0u, i1u):    # uint8 HxWx3 -> float HxWx3 0..255
-    i0 = torch.from_numpy(i0u).permute(2,0,1)[None].float().to(device)/255.
-    i1 = torch.from_numpy(i1u).permute(2,0,1)[None].float().to(device)/255.
-    x0,h,w = pad64(i0); x1,_,_ = pad64(i1)
-    out = rife_forward(flownet, x0, x1)[:,:, :h,:w].clamp(0,1)
-    return out[0].permute(1,2,0).cpu().numpy()*255
+def rife_scaled(i0u, i1u, scale=0.5, tta=True):   # uint8 HxWx3 -> float HxWx3 0..255
+    m = 64 * math.ceil(1.0/scale)                 # scale-aware pad: 1.0->64, 0.5->128, 0.25->256
+    def padm(t):
+        _,_,h,w=t.shape; ph=((h-1)//m+1)*m; pw=((w-1)//m+1)*m
+        return F.pad(t,(0,pw-w,0,ph-h),mode='replicate'), h, w
+    def run(a0,a1):
+        i0=torch.from_numpy(np.ascontiguousarray(a0)).permute(2,0,1)[None].float().to(device)/255.
+        i1=torch.from_numpy(np.ascontiguousarray(a1)).permute(2,0,1)[None].float().to(device)/255.
+        x0,h,w=padm(i0); x1,_,_=padm(i1)
+        out=rife_forward(flownet,x0,x1,0.5,scale)[:,:, :h,:w].clamp(0,1)
+        return out[0].permute(1,2,0).cpu().numpy()*255
+    p=run(i0u,i1u)
+    if tta:                                        # horizontal-flip test-time augmentation
+        pf=run(i0u[:,::-1], i1u[:,::-1])[:,::-1]; p=0.5*(p+pf)
+    return p
 
+# pick best ensemble on val (fine-tuned RIFE scale0.5+TTA blended with DIS)
 val_dirs = sorted(str(p) for p in Path(TRAIN_ROOT).iterdir() if p.is_dir())
-random.shuffle(val_dirs); val_dirs = val_dirs[:80]
-acc = {k:0.0 for k in ['ft_rife','dis','0.5dis+0.5ft','0.3dis+0.7ft']}; n=0
+random.shuffle(val_dirs); val_dirs = val_dirs[:100]
+acc = {k:0.0 for k in ['ft_tta','dis','0.5dis+0.5ft','0.3dis+0.7ft']}; n=0
 for sd in tqdm(val_dirs):
     sd=Path(sd); meta=json.loads((sd/'meta.json').read_text()); cam=meta['target_camera']; a=get_alpha(meta)
     gt = np.array(Image.open(sd/'target'/f'{cam}.jpg').convert('RGB'))
     i0u = np.array(Image.open(sd/'input'/'t0'/f'{cam}.jpg').convert('RGB'))
     i1u = np.array(Image.open(sd/'input'/'t1'/f'{cam}.jpg').convert('RGB'))
-    rf = ft_rife(i0u,i1u); ds = dis_interp(i0u,i1u,a)
-    acc['ft_rife'] += psnr_np(rf,gt); acc['dis'] += psnr_np(ds,gt)
-    acc['0.5dis+0.5ft'] += psnr_np(0.5*ds+0.5*rf, gt)
-    acc['0.3dis+0.7ft'] += psnr_np(0.3*ds+0.7*rf, gt); n+=1
+    r = rife_scaled(i0u,i1u); ds = dis_interp(i0u,i1u,a)
+    acc['ft_tta'] += psnr_np(r,gt); acc['dis'] += psnr_np(ds,gt)
+    acc['0.5dis+0.5ft'] += psnr_np(0.5*ds+0.5*r, gt)
+    acc['0.3dis+0.7ft'] += psnr_np(0.3*ds+0.7*r, gt); n+=1
 print(f'\\nval over {n}:')
 for k,v in sorted(acc.items(), key=lambda kv:-kv[1]): print(f'  {k:16s} {v/n:.3f} dB')
 BEST = max(acc, key=acc.get); print('BEST:', BEST)""")
 
 md("## 6. Build submission with the best method")
 code("""def predict(i0u,i1u,a,method):
-    if method=='ft_rife': return ft_rife(i0u,i1u)
-    if method=='dis': return dis_interp(i0u,i1u,a)
-    if method=='0.5dis+0.5ft': return 0.5*dis_interp(i0u,i1u,a)+0.5*ft_rife(i0u,i1u)
-    if method=='0.3dis+0.7ft': return 0.3*dis_interp(i0u,i1u,a)+0.7*ft_rife(i0u,i1u)
-    raise ValueError(method)
+    r = rife_scaled(i0u,i1u); ds = dis_interp(i0u,i1u,a)
+    return {'ft_tta':r, 'dis':ds, '0.5dis+0.5ft':0.5*ds+0.5*r, '0.3dis+0.7ft':0.3*ds+0.7*r}[method]
 
 def make_submission(test_root, method, out='/kaggle/working/submission'):
     dirs=sorted(p for p in Path(test_root).iterdir() if p.is_dir()); os.makedirs(out,exist_ok=True)
