@@ -12,7 +12,7 @@ SRC_DIR="$(cd "${SCRIPT_DIR}/../src" && pwd)"
 OUT="${1:-${SCRIPT_DIR}/../submission.zip}"
 
 rm -f "$OUT"
-( cd "$SRC_DIR" && zip -j "$OUT" Dockerfile train.py solve.py common.py model.py search.py )
+( cd "$SRC_DIR" && zip -j "$OUT" Dockerfile train.py solve.py common.py model.py search.py optimize.py )
 
 echo "=== submission contents ==="
 unzip -l "$OUT"
