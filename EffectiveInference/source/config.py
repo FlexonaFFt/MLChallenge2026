@@ -127,6 +127,12 @@ CATEGORY_MAX_TOKENS: dict[str, int] = {
 @dataclass
 class InferenceConfig:
     model_dir: str = "./weights"
+    # Дообученная (SFT) модель: стиль/формат пришли из весов. Она училась на
+    # MINIMAL_SYSTEM БЕЗ few-shot — рантайм обязан это повторить, иначе
+    # train/inference mismatch резко роняет качество. См. __post_init__.
+    # Для СТОКОВОЙ (не дообученной) модели поставить finetuned=False → вернётся
+    # RICH-промпт + категорийный few-shot (режим, давший лучшие 67.2 на base).
+    finetuned: bool = True
     max_new_tokens: int = 768
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
@@ -161,3 +167,13 @@ class InferenceConfig:
     enable_wall_guard: bool = True
     gen_budget_sec: float = 13.5 * 60        # переопределяется env GEN_BUDGET_SEC
     gen_chunk_size: int = 512
+
+    def __post_init__(self) -> None:
+        # Согласовать рантайм с тем, как училась дообученная модель: минимальный
+        # system-промпт и НИКАКОГО few-shot (его в обучении не было). Бюджет
+        # токенов по категориям (enable_dynamic_max_tokens) и точный шорткат
+        # остаются — они от формата обучения не зависят.
+        if self.finetuned:
+            self.system_prompt = MINIMAL_SYSTEM
+            self.enable_category_fewshot = False
+            self.dynamic_few_shot = False
