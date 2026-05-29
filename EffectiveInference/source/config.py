@@ -137,6 +137,10 @@ class InferenceConfig:
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
     temperature: float = 0.0
+    # Sampling: дефолт = greedy (top_p=1, top_k=-1, temp=0). Профили в ab_eval.py
+    # могут включать сэмплинг (напр. Qwen3 non-thinking: temp=0.7/top_p=0.8/top_k=20).
+    top_p: float = 1.0
+    top_k: int = -1
     dtype: str = "float16"   # AWQ-модель → fp16 compute (для bf16-модели ставить "bfloat16")
     # Speculative decoding отключён: vLLM 0.11 (v1) НЕ поддерживает draft-model spec
     # (только ngram/eagle/mtp или env VLLM_USE_V1=0). "" — выключено.

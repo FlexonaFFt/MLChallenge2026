@@ -51,20 +51,20 @@ class SchoolQAEngine:
                 "num_speculative_tokens": config.num_speculative_tokens,
             }
         self.llm = LLM(**llm_kwargs)
-        self.sampling_params = SamplingParams(
-            temperature=config.temperature,
-            max_tokens=config.max_new_tokens,
-            top_k=-1,
-        )
-        self._sp_cache: dict[int, SamplingParams] = {}
+        self._sp_cache: dict[tuple, SamplingParams] = {}
 
     def _sampling_for(self, max_tokens: int) -> SamplingParams:
-        sp = self._sp_cache.get(max_tokens)
+        c = self.config
+        # ключ включает все sampling-поля: ab_eval.py мутирует config между
+        # профилями на одном инстансе движка — иначе вернулись бы устаревшие params.
+        key = (max_tokens, c.temperature, c.top_p, c.top_k)
+        sp = self._sp_cache.get(key)
         if sp is None:
             sp = SamplingParams(
-                temperature=self.config.temperature, max_tokens=max_tokens, top_k=-1
+                temperature=c.temperature, max_tokens=max_tokens,
+                top_p=c.top_p, top_k=c.top_k,
             )
-            self._sp_cache[max_tokens] = sp
+            self._sp_cache[key] = sp
         return sp
 
     def _max_tokens_for(self, question: str) -> int:
