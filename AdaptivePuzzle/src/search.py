@@ -786,7 +786,10 @@ class BackwardTable:
     @classmethod
     def load(cls, path: str) -> Optional["BackwardTable"]:
         try:
-            d = np.load(path)
+            # mmap so multiple workers share the OS page cache instead of each
+            # holding a private copy in RAM — otherwise 8 workers x large table
+            # blows past the grader's memory limit and we get OOM-killed (RE).
+            d = np.load(path, mmap_mode="r")
             return cls(d["keys"], d["depths"])
         except Exception:
             return None
