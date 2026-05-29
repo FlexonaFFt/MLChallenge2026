@@ -132,7 +132,7 @@ class InferenceConfig:
     # train/inference mismatch резко роняет качество. См. __post_init__.
     # Для СТОКОВОЙ (не дообученной) модели поставить finetuned=False → вернётся
     # RICH-промпт + категорийный few-shot (режим, давший лучшие 67.2 на base).
-    finetuned: bool = True
+    finetuned: bool = False
     max_new_tokens: int = 768
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
