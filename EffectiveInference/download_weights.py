@@ -1,4 +1,4 @@
-"""Скачивает QuantTrio/Qwen3.5-4B-AWQ с Hugging Face в ./weights.
+"""Скачивает cyankiwi/Qwen3.5-4B-AWQ-4bit с Hugging Face в ./weights.
 
 Запустите ОДИН раз локально перед сборкой образа:
 
@@ -12,7 +12,7 @@
 """
 from huggingface_hub import snapshot_download
 
-TARGET_REPO = "QuantTrio/Qwen3.5-4B-AWQ"
+TARGET_REPO = "cyankiwi/Qwen3.5-4B-AWQ-4bit"
 
 PATTERNS = [
     "*.json",
