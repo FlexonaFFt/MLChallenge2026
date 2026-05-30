@@ -5,8 +5,7 @@ FROM cr.yandex/crp2q2b12lka2f8enigt/pytorch/pytorch:2.8.0-cuda12.6-cudnn9-runtim
 RUN apt-get update && apt-get install -y build-essential
 
 RUN pip3 install --no-cache-dir \
-    "vllm==0.11.0" \
-    "transformers==4.56.1" \
+    "vllm==0.22.0" \
     "scikit-learn==1.5.2"
 
 WORKDIR /workspace

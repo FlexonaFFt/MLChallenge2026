@@ -47,6 +47,22 @@ PROFILES: dict[str, dict] = {
             "physics": 1100, "math": 768, "morphology": 768, "english": 768,
         }
     },
+    # победитель по качеству (essay_headroom) + сэмплинг Qwen — проверяем, складываются ли эффекты.
+    "essay_sampling": {
+        "temperature": 0.7, "top_p": 0.8, "top_k": 20,
+        "category_max_tokens": {
+            "essay": 2048, "default": 1536, "chemistry": 1100, "grammar": 1100,
+            "physics": 1100, "math": 768, "morphology": 768, "english": 768,
+        },
+    },
+    # тот же приём против обрезки, но скромнее по потолку → меньше TL-риска на L4
+    # (essay_headroom был самым медленным, ~впритык к 15-мин лимиту).
+    "essay_safe": {
+        "category_max_tokens": {
+            "essay": 1536, "default": 1280, "chemistry": 1100, "grammar": 1100,
+            "physics": 1100, "math": 768, "morphology": 768, "english": 768,
+        }
+    },
 }
 
 
@@ -54,6 +70,12 @@ def make_config(model_dir: str, overrides: dict) -> InferenceConfig:
     cfg = InferenceConfig(model_dir=model_dir, finetuned=False)
     # wall-guard выкл на eval: хотим полный прогон, тайминг считаем отдельно.
     cfg.enable_wall_guard = False
+    # КРИТИЧНО: exact-match shortcut выключаем на eval. fewshot_pool.jsonl построен
+    # из всего датасета и содержит held-out eval-запросы → матчер отдал бы эталон
+    # напрямую, модель бы не запустилась, и ВСЕ профили вышли бы идентичными
+    # (ровно этот баг и наблюдали: 0.510 / 71-164-65 у всех). Здесь меряем КАЧЕСТВО
+    # МОДЕЛИ, поэтому шорткат off. В контейнере он остаётся включён (там утечки нет).
+    cfg.enable_shortcut = False
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg

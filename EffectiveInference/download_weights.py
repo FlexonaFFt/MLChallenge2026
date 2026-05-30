@@ -1,4 +1,4 @@
-"""Скачивает Qwen3-0.6B с Hugging Face в ./weights.
+"""Скачивает QuantTrio/Qwen3.5-4B-AWQ с Hugging Face в ./weights.
 
 Запустите ОДИН раз локально перед сборкой образа:
 
@@ -12,9 +12,16 @@
 """
 from huggingface_hub import snapshot_download
 
-TARGET_REPO = "Qwen/Qwen3-4B-AWQ"
+TARGET_REPO = "QuantTrio/Qwen3.5-4B-AWQ"
 
-PATTERNS = ["*.json", "*.safetensors", "*.txt", "tokenizer*", "*.jinja"]
+PATTERNS = [
+    "*.json",
+    "*.safetensors",
+    "*.txt",
+    "*.jinja",
+    "tokenizer*",
+    ".*",
+]
 
 
 def dl(repo: str, out: str) -> None:
