@@ -204,9 +204,40 @@ md("## 5. Train with scene-disjoint early stopping")
 code("""scset=sorted(set(meta_scene[n] for n in names)); random.seed(7); random.shuffle(scset)
 val_sc=set(scset[:max(1,len(scset)//6)])
 val_names=[n for n in names if meta_scene[n] in val_sc]; tr_names=[n for n in names if meta_scene[n] not in val_sc]
+random.shuffle(val_names); val_names=val_names[:120]      # cap val for speed (full-frame fwd each epoch)
 print(f'scenes={len(scset)} | train={len(tr_names)} val={len(val_names)}')
-tl=DataLoader(FuseDS(tr_names,256,True),batch_size=16,shuffle=True,num_workers=4,pin_memory=True,drop_last=True,persistent_workers=True)
-vl=DataLoader(FuseDS(val_names,0,False),batch_size=1,shuffle=False,num_workers=2)
+
+# RAM-preload the cache: one decompress instead of per-iteration disk reads.
+# float16 (~16 GB for 900); workers share it copy-on-write. Falls back to disk on MemoryError.
+RAM={}
+try:
+    for n in tqdm(names, desc='cache->RAM'):
+        d=np.load(Path(CACHE)/f'{n}.npz'); RAM[n]={k:d[k] for k in ('rife','geo','trust','t0','t1','gt')}
+    print(f'RAM cache: {len(RAM)} samples')
+except MemoryError:
+    RAM={}; print('MemoryError -> falling back to disk (lower N_TRAIN to use RAM)')
+
+class RAMDS(Dataset):
+    def __init__(self,names,crop=256,train=True): self.names=names; self.crop=crop; self.train=train
+    def __len__(self): return len(self.names)
+    def __getitem__(self,i):
+        nm=self.names[i]; d=RAM[nm] if nm in RAM else np.load(Path(CACHE)/f'{nm}.npz')
+        rife=d['rife'].astype(np.float32); geo=d['geo'].astype(np.float32); trust=d['trust'].astype(np.float32)
+        t0=d['t0'].astype(np.float32); t1=d['t1'].astype(np.float32); gt=d['gt'].astype(np.float32)
+        tt=np.clip(cv2.GaussianBlur(trust,(0,0),3.0),0,CAP)[...,None]; base=tt*geo+(1-tt)*rife
+        x=np.concatenate([t0,t1,rife,geo,trust[...,None]],2); H,W=gt.shape[:2]
+        if self.train and self.crop:
+            ch,cw=min(self.crop,H),min(self.crop,W); t=np.random.randint(0,H-ch+1); l=np.random.randint(0,W-cw+1)
+            sl=(slice(t,t+ch),slice(l,l+cw)); x,base,gt=x[sl],base[sl],gt[sl]
+            if np.random.rand()<0.5: x=x[:,::-1].copy(); base=base[:,::-1].copy(); gt=gt[:,::-1].copy()
+            g=np.random.uniform(0.9,1.1); b=np.random.uniform(-0.04,0.04)
+            x[...,:12]=np.clip(x[...,:12]*g+b,0,1); base=np.clip(base*g+b,0,1); gt=np.clip(gt*g+b,0,1)
+        def tt_(a): return torch.from_numpy(np.ascontiguousarray(a.transpose(2,0,1)))
+        return tt_(x),tt_(base),tt_(gt)
+
+NG=torch.cuda.device_count(); print('GPUs:',NG)
+tl=DataLoader(RAMDS(tr_names,256,True),batch_size=16*max(1,NG),shuffle=True,num_workers=8,pin_memory=True,drop_last=True,persistent_workers=True)
+vl=DataLoader(RAMDS(val_names,0,False),batch_size=1,shuffle=False,num_workers=2)
 
 def ssim(a,b):
     C=a.shape[1]; k=11; s=1.5; c=torch.arange(k,device=a.device,dtype=torch.float32)-k//2
@@ -228,19 +259,24 @@ def val_scores(net):
         base.append(score_of(20*math.log10(1/math.sqrt(max(mseb,1e-10)))))
     net.train(); return float(np.mean(ref)),float(np.mean(base))
 
-net=Refiner().to(device); opt=torch.optim.AdamW(net.parameters(),lr=3e-4,weight_decay=1e-4)
+core=Refiner().to(device)
+net=nn.DataParallel(core) if NG>1 else core      # split batch across both T4s
+opt=torch.optim.AdamW(core.parameters(),lr=3e-4,weight_decay=1e-4)
 EPOCHS=40; sch=torch.optim.lr_scheduler.CosineAnnealingLR(opt,T_max=EPOCHS)
+scaler=torch.cuda.amp.GradScaler()                       # mixed precision -> faster on T4
 r0,b0=val_scores(net); print(f'init: base={b0:.3f} refiner={r0:.3f} (should match)')
 best=b0; bad=0
 for ep in range(EPOCHS):
     net.train(); pb=tqdm(tl,desc=f'ep{ep}')
     for x,b,g in pb:
-        x,b,g=x.to(device),b.to(device),g.to(device)
-        opt.zero_grad(set_to_none=True); pr=net(x,b)
-        loss=F.l1_loss(pr,g)+0.1*(1-ssim(pr,g)); loss.backward(); opt.step(); pb.set_postfix(l=f'{loss.item():.4f}')
+        x,b,g=x.to(device,non_blocking=True),b.to(device,non_blocking=True),g.to(device,non_blocking=True)
+        opt.zero_grad(set_to_none=True)
+        with torch.cuda.amp.autocast():
+            pr=net(x,b); loss=F.l1_loss(pr,g)+0.1*(1-ssim(pr,g))
+        scaler.scale(loss).backward(); scaler.step(opt); scaler.update(); pb.set_postfix(l=f'{loss.item():.4f}')
     sch.step(); rs,bs=val_scores(net); print(f'ep{ep}: refiner={rs:.3f} base={bs:.3f} gain={rs-bs:+.3f}')
     if rs>best+1e-3:
-        best=rs; bad=0; torch.save(net.state_dict(),'/kaggle/working/refiner.pt'); print(f'  -> best {best:.3f} saved')
+        best=rs; bad=0; torch.save(core.state_dict(),'/kaggle/working/refiner.pt'); print(f'  -> best {best:.3f} saved')
     else:
         bad+=1
         if bad>=6: print('early stop'); break
@@ -249,7 +285,7 @@ print(f'done. best refiner val={best:.3f} | base={b0:.3f} | gain={best-b0:+.3f}'
 md("## 6. Submission (refiner if it beat base, else base; q100)")
 code("""USE_REF=os.path.exists('/kaggle/working/refiner.pt') and best>b0+0.05
 if USE_REF:
-    net.load_state_dict(torch.load('/kaggle/working/refiner.pt')); net.eval(); print('using REFINER')
+    core.load_state_dict(torch.load('/kaggle/working/refiner.pt')); core.eval(); print('using REFINER')
 else: print('refiner did not beat base -> submitting BASE hybrid')
 
 @torch.no_grad()
@@ -261,7 +297,7 @@ def predict(sd):
     bt=torch.from_numpy(base.transpose(2,0,1))[None].float().to(device)
     _,_,h,w=xt.shape; ph=((h-1)//8+1)*8; pw=((w-1)//8+1)*8
     xp=F.pad(xt,(0,pw-w,0,ph-h)); bp=F.pad(bt,(0,pw-w,0,ph-h))
-    return net(xp,bp)[:,:, :h,:w][0].permute(1,2,0).cpu().numpy()
+    return core(xp,bp)[:,:, :h,:w][0].permute(1,2,0).cpu().numpy()
 
 out='/kaggle/working/submission'
 if os.path.exists(out): shutil.rmtree(out)

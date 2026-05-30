@@ -16,6 +16,7 @@ from model import ValueNet
 from search import (
     solve_astar, solve_bidirectional, build_linear_solver, build_manhattan_h,
     make_misplaced_h, solve_with_table, BackwardTable,
+    build_packed_engine, packed_bidirectional, _flatten_state,
 )
 
 
@@ -92,6 +93,27 @@ def _init_worker(budget: float, global_deadline: float):
     # Backward distance table built in train.py (BFS from goal). If present,
     # forward-search into it + descend -> optimal solutions, cracks deep ones.
     _W["table"] = BackwardTable.load(TABLE_PATH)
+    # Packed-state engine: env.step-free search for state-independent
+    # permutation/toggle puzzles (~20-60x node throughput). None on blank/slide
+    # puzzles -> existing env path runs unchanged (zero regression).
+    try:
+        _W["packed"] = build_packed_engine(env, _W["solved_state"])
+    except Exception:
+        _W["packed"] = None
+
+
+def _verify_solution(env, start_state, actions) -> bool:
+    """Replay `actions` from `start_state` through the env; True iff it solves.
+    Cheap safety net for the packed-engine path on unseen hidden puzzles."""
+    try:
+        env.set_state(start_state)
+        for a in actions:
+            if a not in env.valid_actions():
+                return False
+            env.step(a)
+        return bool(env.is_solved())
+    except Exception:
+        return False
 
 
 def _solve_one(inst):
@@ -122,9 +144,25 @@ def _solve_one(inst):
                 _W["env"], inst["state"], _W["solved_state"], _W["table"],
                 _W["cheap_h"], table_deadline,
             )
+        # Phase 0.8: packed-state bidirectional BFS (env.step-free, ~20-60x
+        # faster -> reaches far deeper). Optimal. Runs on state-independent
+        # permutation/toggle puzzles; None otherwise.
+        if sol is None and _W["packed"] is not None:
+            bidi_deadline = now + 0.4 * (inst_deadline - now)
+            try:
+                start_vec = _flatten_state(inst["state"]).astype(np.int16)
+                cand = packed_bidirectional(_W["packed"], start_vec, bidi_deadline)
+                # verify by env replay (guards against any flatten/order mismatch
+                # on an unseen hidden puzzle): only accept a genuinely solving path
+                if cand is not None and _verify_solution(
+                    _W["env"], inst["state"], cand):
+                    sol = cand
+            except Exception:
+                sol = None
         # Phase 1: bidirectional BFS (shortest path -> best ratio). Give it most
-        # of the per-instance budget, then fall back to V-guided A*.
-        if sol is None:
+        # of the per-instance budget, then fall back to V-guided A*. Skipped when
+        # the packed engine already ran (it supersedes env-bidi).
+        if sol is None and _W["packed"] is None:
             bidi_deadline = now + 0.4 * (inst_deadline - now)
             sol = solve_bidirectional(
                 _W["env"], inst["state"], _W["solved_state"], bidi_deadline

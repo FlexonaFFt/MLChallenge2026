@@ -714,142 +714,62 @@ def _reconstruct(end_k, parents) -> List[str]:
 # idle 50-min train budget.
 # ---------------------------------------------------------------------------
 
-class BuiltTable:
-    """Backward table held as two parallel, KEY-SORTED numpy arrays:
-    `keys` (uint64 state hashes) and `depths` (uint16 distance-to-goal).
-
-    Replaces the old Python ``{hash: depth}`` dict. A dict of large-int keys
-    costs ~155 B/state; these sorted arrays cost ~10 B/state (8+2), so ~9x
-    more states fit under the same RSS cap during BFS -> a deeper table
-    radius on high-branching puzzles. Membership is a batched
-    ``np.searchsorted`` (C speed) instead of per-element python probing, so
-    building is no slower than the dict. The on-disk layout is identical to
-    these arrays, so saving is a direct dump (no conversion)."""
-
-    __slots__ = ("keys", "depths")
-
-    def __init__(self, keys: np.ndarray, depths: np.ndarray):
-        self.keys = keys
-        self.depths = depths
-
-    def __len__(self) -> int:
-        return int(self.keys.size)
-
-
-def _membership(seen_keys: np.ndarray, query: np.ndarray) -> np.ndarray:
-    """Boolean mask: True where `query[i]` is NOT already in sorted `seen_keys`."""
-    if seen_keys.size == 0:
-        return np.ones(query.size, dtype=bool)
-    pos = np.searchsorted(seen_keys, query)
-    pos_clipped = np.minimum(pos, seen_keys.size - 1)
-    return seen_keys[pos_clipped] != query
-
-
 def build_backward_table(env, solved_state, deadline, max_states=40_000_000,
                          mem_cap_bytes=None):
-    """BFS outward from the goal. Returns (BuiltTable, max_depth).
+    """BFS outward from the goal. Returns (dict {state_hash: depth}, max_depth).
 
     Stops on: time deadline, max_states, OR a memory cap (RSS) — the last is the
     key safety guard: high-branching puzzles blow up memory fast, so we halt
-    before OOM. A partial table is still EXACT for the states it contains.
-
-    The set of seen hashes is kept as a key-sorted uint64 array (compact, C-fast
-    membership). The frontier is expanded in CHUNKS so the transient list of
-    child states never exceeds one chunk of edges, bounding peak memory
-    regardless of branching factor."""
+    before OOM. A partial table is still EXACT for the states it contains."""
     if mem_cap_bytes is None:
         mem_cap_bytes = int(float(os.environ.get("TABLE_MEM_CAP_GB", "22")) * (1024 ** 3))
-    chunk = max(500, int(os.environ.get("TABLE_BUILD_CHUNK", "8000")))
     env.set_state(solved_state)
     goal = env.get_state()
-
-    seen_keys = np.array([state_hash(goal)], dtype=np.uint64)
-    seen_deps = np.array([0], dtype=np.uint16)
+    table = {state_hash(goal): 0}
     frontier = [goal]
     depth = 0
+    since_check = 0
 
-    def over_budget(extra=0):
-        # `extra` = states accumulated in the current layer but not yet folded
-        # into seen_keys, so max_states is enforced live (per chunk) and an
-        # explosive layer can't overshoot the cap by a whole layer.
-        return (time.time() >= deadline
-                or seen_keys.size + extra >= max_states
+    def over_budget():
+        return (time.time() >= deadline or len(table) >= max_states
                 or _rss_bytes() >= mem_cap_bytes)
 
     while frontier and not over_budget():
         depth += 1
-        # accumulate this layer's newly-discovered states across chunks, then
-        # fold into `seen` with a SINGLE sort at the end of the layer.
-        layer_states: List[Any] = []
-        layer_keys_parts: List[np.ndarray] = []
+        nxt = []
         stop = False
-
-        for cstart in range(0, len(frontier), chunk):
-            if over_budget(len(layer_states)):
-                stop = True
-                break
-            child_states: List[Any] = []
-            child_hashes: List[int] = []
-            for st in frontier[cstart:cstart + chunk]:
+        for st in frontier:
+            try:
+                env.set_state(st)
+                valid = env.valid_actions()
+            except Exception:
+                continue
+            for a in valid:
                 try:
                     env.set_state(st)
-                    valid = env.valid_actions()
+                    env.step(a)
+                    ns = env.get_state()
                 except Exception:
                     continue
-                for a in valid:
-                    try:
-                        env.set_state(st)
-                        env.step(a)
-                        ns = env.get_state()
-                    except Exception:
-                        continue
-                    child_states.append(ns)
-                    child_hashes.append(state_hash(ns))
-
-            if not child_hashes:
-                continue
-
-            ch = np.fromiter(child_hashes, dtype=np.uint64, count=len(child_hashes))
-            # dedup within this chunk, keep first index to map hash -> a state
-            uniq, first_idx = np.unique(ch, return_index=True)
-            # filter out states already discovered in an earlier (<=) depth
-            new_mask = _membership(seen_keys, uniq)
-            if not new_mask.any():
-                continue
-            new_keys = uniq[new_mask]
-            new_idx = first_idx[new_mask]
-            layer_keys_parts.append(new_keys)
-            for i in new_idx.tolist():
-                layer_states.append(child_states[i])
-
-        if layer_keys_parts:
-            # drop cross-chunk duplicates discovered within this same layer
-            flat_keys = np.concatenate(layer_keys_parts)
-            uniq_keys, uniq_first = np.unique(flat_keys, return_index=True)
-            frontier = [layer_states[i] for i in uniq_first.tolist()]
-            # one merge+sort per layer (vs per chunk) keeps build cost low
-            merged = np.concatenate([seen_keys, uniq_keys])
-            merged_dep = np.concatenate(
-                [seen_deps, np.full(uniq_keys.size, depth, dtype=np.uint16)])
-            order = np.argsort(merged, kind="stable")
-            seen_keys = merged[order]
-            seen_deps = merged_dep[order]
-        else:
-            frontier = []
-
-        if stop:
-            break
-
-    return BuiltTable(seen_keys, seen_deps), depth
+                h = state_hash(ns)
+                if h not in table:
+                    table[h] = depth
+                    nxt.append(ns)
+                    since_check += 1
+                    if since_check >= 20_000:
+                        since_check = 0
+                        if over_budget():
+                            stop = True
+                            break
+            if stop:
+                break
+        frontier = nxt
+    return table, depth
 
 
-def save_backward_table(table, path: str):
-    """Store as sorted uint64 hashes + uint16 depths (compact, fast to load,
-    cheap per-worker memory vs a Python dict). Accepts a BuiltTable (already
-    sorted) or a legacy {hash: depth} dict."""
-    if isinstance(table, BuiltTable):
-        np.savez(path, keys=table.keys, depths=table.depths.astype(np.uint16))
-        return
+def save_backward_table(table: dict, path: str):
+    """Store as sorted uint64 hashes + uint8 depths (compact, fast to load,
+    cheap per-worker memory vs a Python dict)."""
     keys = np.fromiter(table.keys(), dtype=np.uint64, count=len(table))
     depths = np.fromiter(table.values(), dtype=np.uint16, count=len(table))
     order = np.argsort(keys)
@@ -967,4 +887,202 @@ def solve_with_table(
         for (nk, ns), h in zip(children, hs):
             cnt += 1
             heapq.heappush(heap, (g[nk] + weight * float(h), cnt, g[nk], nk, ns))
+    return None
+
+
+# =====================================================================
+# Packed-state engine (descriptor-driven, env.step-free search)
+# =====================================================================
+#
+# When a puzzle's actions are STATE-INDEPENDENT content permutations / toggles
+# (Rubik-like rotation, general permutation, Lights-Out), the whole search can
+# run on a flat int vector with each move applied as one numpy op:
+#     permutation:  new = old[gather]   (gather built from map_from/map_to)
+#     toggle (XOR): new = old ^ mask    (binary cells)
+# This removes the env.set_state/step/get_state round-trip (the measured
+# throughput bottleneck) -> ~50-100x more nodes/s, so bidirectional BFS reaches
+# far deeper on high-branching hidden permutation puzzles. The engine is built
+# ONLY after VERIFYING every action reproduces env.step on many random states;
+# otherwise build returns None and the existing env-based path runs unchanged
+# (zero regression on blank/slide/state-dependent puzzles like 15 & cylinder).
+
+
+class PackedEngine:
+    def __init__(self, actions, gathers, inv_gathers, xor_masks, goal_vec):
+        self.actions = list(actions)            # forward action ids (str)
+        self.gathers = gathers                  # list[np.ndarray|None]  new = old[g]
+        self.inv_gathers = inv_gathers          # list[np.ndarray|None]  inverse op
+        self.xor_masks = xor_masks              # list[np.ndarray|None]  toggle mask
+        self.goal_vec = np.asarray(goal_vec, dtype=np.int16)
+        self.n_actions = len(self.actions)
+
+
+def build_packed_engine(env, solved_state, scrambles=24, seed=0):
+    """Detect a fully state-independent permutation/toggle puzzle and compile a
+    PackedEngine, else None. Correctness is GUARANTEED by replaying every action
+    against env.step on the solved state + many scrambles; any mismatch -> None.
+    """
+    rng = random.Random(seed)
+    try:
+        env.set_state(solved_state)
+        goal = env.get_state()
+        goal_vec = _flatten_state(goal).astype(np.int16)
+    except Exception:
+        return None
+    n = int(goal_vec.size)
+    if n == 0:
+        return None
+    try:
+        base_actions = list(env.valid_actions())
+    except Exception:
+        return None
+    if not base_actions:
+        return None
+    base_set = set(base_actions)
+
+    # Sample states; bail out immediately if the valid-action SET ever changes
+    # (that means actions are state-dependent -> packed model can't be static).
+    states = [goal]
+    for _ in range(scrambles):
+        env.set_state(solved_state)
+        depth = rng.randint(1, 30)
+        ok = True
+        for _ in range(depth):
+            va = env.valid_actions()
+            if not va:
+                ok = False
+                break
+            env.step(rng.choice(va))
+        if not ok:
+            continue
+        try:
+            if set(env.valid_actions()) != base_set:
+                return None
+        except Exception:
+            return None
+        states.append(env.get_state())
+
+    try:
+        env.set_state(solved_state)
+        desc = env.encode_actions()
+        idx_of = {a: i for i, a in enumerate(desc["actions"])}
+    except Exception:
+        return None
+
+    gathers, inv_gathers, xor_masks = [], [], []
+    for a in base_actions:
+        di = idx_of.get(a)
+        if di is None:
+            return None
+        mf = desc["map_from"][di]
+        mt = desc["map_to"][di]
+        affected = desc["affected"][di]
+        cand_g = None
+        cand_mask = None
+        if mf and mt and len(mf) == len(mt):
+            g = np.arange(n, dtype=np.int64)
+            try:
+                g[np.asarray(mt, dtype=np.int64)] = np.asarray(mf, dtype=np.int64)
+            except Exception:
+                return None
+            cand_g = g
+        else:
+            mask = np.zeros(n, dtype=np.int16)
+            try:
+                idx = np.asarray(affected, dtype=np.int64)
+                if idx.size:
+                    mask[idx] = 1
+            except Exception:
+                return None
+            cand_mask = mask
+        # verify this action reproduces env.step everywhere
+        for st in states:
+            bvec = _flatten_state(st).astype(np.int16)
+            env.set_state(st)
+            try:
+                env.step(a)
+                avec = _flatten_state(env.get_state()).astype(np.int16)
+            except Exception:
+                return None
+            pred = bvec[cand_g] if cand_g is not None else (bvec ^ cand_mask)
+            if not np.array_equal(pred, avec):
+                return None
+        gathers.append(cand_g)
+        xor_masks.append(cand_mask)
+        inv_gathers.append(np.argsort(cand_g) if cand_g is not None else None)
+
+    return PackedEngine(base_actions, gathers, inv_gathers, xor_masks, goal_vec)
+
+
+def _packed_stitch(meet_key, fwd, bwd, acts):
+    head = []
+    cur = meet_key
+    while True:
+        pk, ai = fwd.get(cur, (None, -1))
+        if pk is None or ai < 0:
+            break
+        head.append(acts[ai])
+        cur = pk
+    head.reverse()
+    tail = []
+    cur = meet_key
+    while True:
+        nk, ai = bwd.get(cur, (None, -1))
+        if nk is None or ai < 0:
+            break
+        tail.append(acts[ai])
+        cur = nk
+    return head + tail
+
+
+def packed_bidirectional(engine, start_vec, deadline, max_nodes=3_000_000):
+    """Meet-in-the-middle BFS in packed vector space. Optimal, env.step-free."""
+    start = np.asarray(start_vec, dtype=np.int16)
+    goal = engine.goal_vec
+    sk = start.tobytes()
+    gk = goal.tobytes()
+    if sk == gk:
+        return []
+    na = engine.n_actions
+    gathers = engine.gathers
+    inv = engine.inv_gathers
+    masks = engine.xor_masks
+    acts = engine.actions
+
+    fwd = {sk: (None, -1)}
+    bwd = {gk: (None, -1)}
+    f_frontier = [(sk, start)]
+    b_frontier = [(gk, goal)]
+    nodes = 2
+
+    while f_frontier and b_frontier:
+        if time.time() >= deadline or nodes >= max_nodes:
+            return None
+        expand_forward = len(f_frontier) <= len(b_frontier)
+        frontier = f_frontier if expand_forward else b_frontier
+        this_side = fwd if expand_forward else bwd
+        other_side = bwd if expand_forward else fwd
+        nxt = []
+        for key, vec in frontier:
+            for ai in range(na):
+                if expand_forward:
+                    g = gathers[ai]
+                    nv = vec[g] if g is not None else (vec ^ masks[ai])
+                else:
+                    ig = inv[ai]
+                    nv = vec[ig] if ig is not None else (vec ^ masks[ai])
+                nk = nv.tobytes()
+                if nk in this_side:
+                    continue
+                this_side[nk] = (key, ai)
+                nodes += 1
+                if nk in other_side:
+                    return _packed_stitch(nk, fwd, bwd, acts)
+                nxt.append((nk, nv))
+                if nodes >= max_nodes:
+                    return None
+        if expand_forward:
+            f_frontier = nxt
+        else:
+            b_frontier = nxt
     return None

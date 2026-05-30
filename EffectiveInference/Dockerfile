@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip3 install --no-cache-dir \
     "vllm==0.22.0"
 
+ENV VLLM_USE_FLASHINFER_SAMPLER=0
+
 WORKDIR /workspace
 COPY . .
 
