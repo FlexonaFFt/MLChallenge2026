@@ -714,62 +714,142 @@ def _reconstruct(end_k, parents) -> List[str]:
 # idle 50-min train budget.
 # ---------------------------------------------------------------------------
 
+class BuiltTable:
+    """Backward table held as two parallel, KEY-SORTED numpy arrays:
+    `keys` (uint64 state hashes) and `depths` (uint16 distance-to-goal).
+
+    Replaces the old Python ``{hash: depth}`` dict. A dict of large-int keys
+    costs ~155 B/state; these sorted arrays cost ~10 B/state (8+2), so ~9x
+    more states fit under the same RSS cap during BFS -> a deeper table
+    radius on high-branching puzzles. Membership is a batched
+    ``np.searchsorted`` (C speed) instead of per-element python probing, so
+    building is no slower than the dict. The on-disk layout is identical to
+    these arrays, so saving is a direct dump (no conversion)."""
+
+    __slots__ = ("keys", "depths")
+
+    def __init__(self, keys: np.ndarray, depths: np.ndarray):
+        self.keys = keys
+        self.depths = depths
+
+    def __len__(self) -> int:
+        return int(self.keys.size)
+
+
+def _membership(seen_keys: np.ndarray, query: np.ndarray) -> np.ndarray:
+    """Boolean mask: True where `query[i]` is NOT already in sorted `seen_keys`."""
+    if seen_keys.size == 0:
+        return np.ones(query.size, dtype=bool)
+    pos = np.searchsorted(seen_keys, query)
+    pos_clipped = np.minimum(pos, seen_keys.size - 1)
+    return seen_keys[pos_clipped] != query
+
+
 def build_backward_table(env, solved_state, deadline, max_states=40_000_000,
                          mem_cap_bytes=None):
-    """BFS outward from the goal. Returns (dict {state_hash: depth}, max_depth).
+    """BFS outward from the goal. Returns (BuiltTable, max_depth).
 
     Stops on: time deadline, max_states, OR a memory cap (RSS) — the last is the
     key safety guard: high-branching puzzles blow up memory fast, so we halt
-    before OOM. A partial table is still EXACT for the states it contains."""
+    before OOM. A partial table is still EXACT for the states it contains.
+
+    The set of seen hashes is kept as a key-sorted uint64 array (compact, C-fast
+    membership). The frontier is expanded in CHUNKS so the transient list of
+    child states never exceeds one chunk of edges, bounding peak memory
+    regardless of branching factor."""
     if mem_cap_bytes is None:
         mem_cap_bytes = int(float(os.environ.get("TABLE_MEM_CAP_GB", "22")) * (1024 ** 3))
+    chunk = max(500, int(os.environ.get("TABLE_BUILD_CHUNK", "8000")))
     env.set_state(solved_state)
     goal = env.get_state()
-    table = {state_hash(goal): 0}
+
+    seen_keys = np.array([state_hash(goal)], dtype=np.uint64)
+    seen_deps = np.array([0], dtype=np.uint16)
     frontier = [goal]
     depth = 0
-    since_check = 0
 
-    def over_budget():
-        return (time.time() >= deadline or len(table) >= max_states
+    def over_budget(extra=0):
+        # `extra` = states accumulated in the current layer but not yet folded
+        # into seen_keys, so max_states is enforced live (per chunk) and an
+        # explosive layer can't overshoot the cap by a whole layer.
+        return (time.time() >= deadline
+                or seen_keys.size + extra >= max_states
                 or _rss_bytes() >= mem_cap_bytes)
 
     while frontier and not over_budget():
         depth += 1
-        nxt = []
+        # accumulate this layer's newly-discovered states across chunks, then
+        # fold into `seen` with a SINGLE sort at the end of the layer.
+        layer_states: List[Any] = []
+        layer_keys_parts: List[np.ndarray] = []
         stop = False
-        for st in frontier:
-            try:
-                env.set_state(st)
-                valid = env.valid_actions()
-            except Exception:
-                continue
-            for a in valid:
+
+        for cstart in range(0, len(frontier), chunk):
+            if over_budget(len(layer_states)):
+                stop = True
+                break
+            child_states: List[Any] = []
+            child_hashes: List[int] = []
+            for st in frontier[cstart:cstart + chunk]:
                 try:
                     env.set_state(st)
-                    env.step(a)
-                    ns = env.get_state()
+                    valid = env.valid_actions()
                 except Exception:
                     continue
-                h = state_hash(ns)
-                if h not in table:
-                    table[h] = depth
-                    nxt.append(ns)
-                    since_check += 1
-                    if since_check >= 20_000:
-                        since_check = 0
-                        if over_budget():
-                            stop = True
-                            break
-            if stop:
-                break
-        frontier = nxt
-    return table, depth
+                for a in valid:
+                    try:
+                        env.set_state(st)
+                        env.step(a)
+                        ns = env.get_state()
+                    except Exception:
+                        continue
+                    child_states.append(ns)
+                    child_hashes.append(state_hash(ns))
+
+            if not child_hashes:
+                continue
+
+            ch = np.fromiter(child_hashes, dtype=np.uint64, count=len(child_hashes))
+            # dedup within this chunk, keep first index to map hash -> a state
+            uniq, first_idx = np.unique(ch, return_index=True)
+            # filter out states already discovered in an earlier (<=) depth
+            new_mask = _membership(seen_keys, uniq)
+            if not new_mask.any():
+                continue
+            new_keys = uniq[new_mask]
+            new_idx = first_idx[new_mask]
+            layer_keys_parts.append(new_keys)
+            for i in new_idx.tolist():
+                layer_states.append(child_states[i])
+
+        if layer_keys_parts:
+            # drop cross-chunk duplicates discovered within this same layer
+            flat_keys = np.concatenate(layer_keys_parts)
+            uniq_keys, uniq_first = np.unique(flat_keys, return_index=True)
+            frontier = [layer_states[i] for i in uniq_first.tolist()]
+            # one merge+sort per layer (vs per chunk) keeps build cost low
+            merged = np.concatenate([seen_keys, uniq_keys])
+            merged_dep = np.concatenate(
+                [seen_deps, np.full(uniq_keys.size, depth, dtype=np.uint16)])
+            order = np.argsort(merged, kind="stable")
+            seen_keys = merged[order]
+            seen_deps = merged_dep[order]
+        else:
+            frontier = []
+
+        if stop:
+            break
+
+    return BuiltTable(seen_keys, seen_deps), depth
 
 
-def save_backward_table(table: dict, path: str):
-    """Store as sorted uint64 hashes + uint8 depths (compact, fast to load,
-    cheap per-worker memory vs a Python dict)."""
+def save_backward_table(table, path: str):
+    """Store as sorted uint64 hashes + uint16 depths (compact, fast to load,
+    cheap per-worker memory vs a Python dict). Accepts a BuiltTable (already
+    sorted) or a legacy {hash: depth} dict."""
+    if isinstance(table, BuiltTable):
+        np.savez(path, keys=table.keys, depths=table.depths.astype(np.uint16))
+        return
     keys = np.fromiter(table.keys(), dtype=np.uint64, count=len(table))
     depths = np.fromiter(table.values(), dtype=np.uint16, count=len(table))
     order = np.argsort(keys)
