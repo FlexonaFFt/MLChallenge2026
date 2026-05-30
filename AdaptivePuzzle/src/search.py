@@ -833,10 +833,13 @@ def _descend_table(env, meet_state, table: "BackwardTable") -> Optional[List[str
 
 def solve_with_table(
     env, initial_state, solved_state, table: "BackwardTable",
-    h_fn, deadline: float, max_nodes: int = 3_000_000,
+    h_fn, deadline: float, max_nodes: int = 3_000_000, weight: float = 1.0,
 ) -> Optional[List[str]]:
-    """Forward weighted-A* (cheap heuristic) until a state is found in the
-    backward table, then descend the table to the goal. Returns actions/None."""
+    """Forward weighted-A* (f = g + weight*h, cheap heuristic) until a state is
+    found in the backward table, then descend the table to the goal. weight=1 is
+    optimal-ish A*; weight>1 is greedier -> reaches the table/goal far more often
+    in a tight budget (longer, suboptimal path, but a valid path beats none).
+    Returns actions/None."""
     env.set_state(initial_state)
     start = env.get_state()
     if table.get(state_hash(start)) >= 0:
@@ -883,5 +886,5 @@ def solve_with_table(
         hs = h_fn([c[1] for c in children]) if h_fn else np.zeros(len(children))
         for (nk, ns), h in zip(children, hs):
             cnt += 1
-            heapq.heappush(heap, (g[nk] + float(h), cnt, g[nk], nk, ns))
+            heapq.heappush(heap, (g[nk] + weight * float(h), cnt, g[nk], nk, ns))
     return None

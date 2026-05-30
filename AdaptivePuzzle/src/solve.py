@@ -125,19 +125,97 @@ def _solve_one(inst):
         # Phase 1: bidirectional BFS (shortest path -> best ratio). Give it most
         # of the per-instance budget, then fall back to V-guided A*.
         if sol is None:
-            bidi_deadline = now + 0.6 * (inst_deadline - now)
+            bidi_deadline = now + 0.4 * (inst_deadline - now)
             sol = solve_bidirectional(
                 _W["env"], inst["state"], _W["solved_state"], bidi_deadline
             )
+        # Split the time that is left after the table/bidi phases between an
+        # OPTIMAL A* (weight 1 -> shortest path -> best ratio) and a GREEDY
+        # best-effort phase. Deadlines are measured from the CURRENT time, not
+        # the stale per-instance `now`, so each gets a real, fair slice.
         if sol is None:
+            rem = time.time()
+            opt_deadline = rem + 0.5 * (inst_deadline - rem)
             sol = solve_astar(
-                _W["env"], inst["state"], _W["solved_state"], _W["cheap_h"], inst_deadline,
-                weight=_W["w"],
+                _W["env"], inst["state"], _W["solved_state"], _W["cheap_h"],
+                opt_deadline, weight=_W["w"],
             )
+        # Best-effort: an empty row scores 0; any VALID path scores baseline/moves
+        # (> 0, uncapped) even if long. A moderately greedy A* (weight ~3, the
+        # measured sweet spot) reaches the goal/table on hard deep instances that
+        # optimal A* cannot in budget. Only runs when every optimal phase missed,
+        # so it never shortens/worsens an already-solved instance.
+        if not sol:
+            gw = float(os.environ.get("GREEDY_WEIGHT", "3.0"))
+            if _W["table"] is not None:
+                sol = solve_with_table(
+                    _W["env"], inst["state"], _W["solved_state"], _W["table"],
+                    _W["cheap_h"], inst_deadline, weight=gw,
+                )
+            if not sol:
+                sol = solve_astar(
+                    _W["env"], inst["state"], _W["solved_state"], _W["cheap_h"],
+                    inst_deadline, weight=gw,
+                )
     except Exception as e:
         print(f"  {iid} failed: {repr(e)}")
         sol = None
     return iid, list(sol or [])
+
+
+def _run_pool(instances, budget, pass_deadline, workers, start):
+    """Run _solve_one over `instances` with per-instance `budget`, collecting
+    results until `pass_deadline` (HARD WALL: stop collecting and force-kill the
+    pool at the deadline no matter what workers are doing -> never overruns the
+    grader's hard kill). Returns {iid: actions}. Sequential fallback if the pool
+    can't start."""
+    results: dict = {}
+    n = len(instances)
+    if n == 0:
+        return results
+    if workers > 1 and n > 1:
+        try:
+            import multiprocessing as mp
+            ctx = mp.get_context("spawn")  # safe with torch on every platform
+            pool = ctx.Pool(
+                processes=workers,
+                initializer=_init_worker,
+                initargs=(budget, pass_deadline),
+            )
+            try:
+                it = pool.imap_unordered(_solve_one, instances, chunksize=1)
+                done = 0
+                while done < n:
+                    remaining = pass_deadline - time.time()
+                    if remaining <= 0:
+                        print("  wall deadline reached; stopping collection")
+                        break
+                    try:
+                        iid, acts = it.next(timeout=remaining)
+                    except mp.TimeoutError:
+                        print("  wall deadline reached (timeout); stopping collection")
+                        break
+                    except StopIteration:
+                        break
+                    results[iid] = acts
+                    done += 1
+                    if done % 50 == 0:
+                        nsolved = sum(1 for v in results.values() if v)
+                        print(f"  {done}/{n} solved={nsolved} elapsed={time.time()-start:.0f}s")
+            finally:
+                pool.terminate()
+                pool.join()
+            return results
+        except Exception as e:
+            print(f"parallel pool failed ({e!r}); falling back to sequential")
+            results = {}
+    _init_worker(budget, pass_deadline)
+    for inst in instances:
+        if time.time() >= pass_deadline:
+            break
+        iid, acts = _solve_one(inst)
+        results[iid] = acts
+    return results
 
 
 def main():
@@ -159,78 +237,42 @@ def main():
     # Fair per-instance compute budget: with W workers over the wall window,
     # each instance may use up to W * window / n seconds of CPU time.
     workers = max(1, min(8, os.cpu_count() or 1))
-    # Memory guard: even with mmap on the backward table, the OS page cache is
-    # bounded. If the table is huge, fewer workers means less contention and a
-    # much smaller blast radius if a worker still buffers a chunk in private
-    # RAM. Override via WORKERS env if needed.
+    # Memory guard. The backward table is loaded via mmap, so it lives in the
+    # shared OS page cache and is counted ONCE regardless of worker count — it is
+    # NOT multiplied by the number of workers. Per-worker PRIVATE memory is the
+    # A* open/closed sets, bounded by the node caps (~1GB/worker worst case). So
+    # 8 workers + a few-GB table stays well under the 32GB CI limit, and using
+    # all 8 cores ~4x's the compute on the hard instances that actually miss the
+    # table. We only step down for a truly huge table. Override via WORKERS env.
     if os.environ.get("WORKERS"):
         workers = max(1, int(os.environ["WORKERS"]))
     elif os.path.exists(TABLE_PATH):
         try:
             tbl_gb = os.path.getsize(TABLE_PATH) / (1024 ** 3)
-            if tbl_gb > 2.0:
-                workers = min(workers, 2)
-            elif tbl_gb > 1.0:
+            if tbl_gb > 12.0:
                 workers = min(workers, 4)
             print(f"backward table size: {tbl_gb:.2f} GB -> workers={workers}")
         except Exception:
             pass
+    # Two-pass budgeting. The backward table solves most instances in ms, so a
+    # single fixed per-instance budget wastes the freed time on idle workers.
+    # PASS 1 gives every instance a modest slice (breadth, capped to 60% of the
+    # window so pass 2 always has time). PASS 2 hands ALL the leftover time to
+    # the few still-unsolved instances (depth) — exactly the hard, high-value
+    # deep ones where a longer greedy search converts a 0 into points.
     window = max(0.0, deadline - time.time())
-    budget = max(0.5, workers * window / n) if n else 0.5
-    print(f"workers={workers} per-instance budget={budget:.1f}s")
+    budget1 = max(0.5, workers * window / n) if n else 0.5
+    pass1_deadline = time.time() + 0.6 * window
+    print(f"workers={workers} pass1 budget={budget1:.1f}s window={window:.0f}s")
+    results = _run_pool(instances, budget1, pass1_deadline, workers, start)
 
-    results: dict = {}
-    ran_parallel = False
-
-    if workers > 1 and n > 1:
-        try:
-            import multiprocessing as mp
-            ctx = mp.get_context("spawn")  # safe with torch on every platform
-            pool = ctx.Pool(
-                processes=workers,
-                initializer=_init_worker,
-                initargs=(budget, deadline),
-            )
-            # HARD WALL GUARD: stop collecting at `deadline` no matter what the
-            # workers are doing, then force-kill the pool. This guarantees
-            # solve.py finishes before the grader's hard time-limit kill
-            # (SAFETY_MARGIN covers terminate + CSV write). Without this the
-            # pool teardown can hang on a stuck worker -> TL.
-            try:
-                it = pool.imap_unordered(_solve_one, instances, chunksize=1)
-                done = 0
-                while done < n:
-                    remaining = deadline - time.time()
-                    if remaining <= 0:
-                        print("  wall deadline reached; stopping collection")
-                        break
-                    try:
-                        iid, acts = it.next(timeout=remaining)
-                    except mp.TimeoutError:
-                        print("  wall deadline reached (timeout); stopping collection")
-                        break
-                    except StopIteration:
-                        break
-                    results[iid] = acts
-                    done += 1
-                    if done % 50 == 0:
-                        nsolved = sum(1 for v in results.values() if v)
-                        print(f"  {done}/{n} solved={nsolved} elapsed={time.time()-start:.0f}s")
-            finally:
-                pool.terminate()
-                pool.join()
-            ran_parallel = True
-        except Exception as e:
-            print(f"parallel pool failed ({e!r}); falling back to sequential")
-            results = {}
-
-    if not ran_parallel:
-        _init_worker(budget, deadline)
-        for inst in instances:
-            if time.time() >= deadline:
-                break
-            iid, acts = _solve_one(inst)
-            results[iid] = acts
+    unsolved = [inst for inst in instances if not results.get(inst["instance_id"])]
+    rem = deadline - time.time()
+    if unsolved and rem > 1.0:
+        # Fair division of the remaining time across the unsolved instances.
+        budget2 = max(budget1, workers * rem / len(unsolved))
+        print(f"  pass2: {len(unsolved)} unsolved, budget={budget2:.1f}s, rem={rem:.0f}s")
+        results.update(_run_pool(unsolved, budget2, deadline, workers, start))
 
     solved = sum(1 for v in results.values() if v)
 
