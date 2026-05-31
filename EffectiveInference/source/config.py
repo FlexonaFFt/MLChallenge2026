@@ -113,14 +113,14 @@ FEW_SHOT_BY_CATEGORY: dict[str, list[tuple[str, str]]] = {
 # риск регрессии без выигрыша по времени. Лишний декод тратится только на тех
 # ответах, что реально длиннее 768 (~14%), и только до их естественной длины.
 CATEGORY_MAX_TOKENS: dict[str, int] = {
-    "essay": 1536,
-    "default": 1100,
-    "chemistry": 1100,
-    "grammar": 1100,
-    "physics": 1100,
-    "math": 768,
-    "morphology": 768,
-    "english": 768,
+    "essay": 1280,
+    "default": 896,
+    "chemistry": 896,
+    "grammar": 896,
+    "physics": 896,
+    "math": 640,
+    "morphology": 640,
+    "english": 640,
 }
 
 
@@ -169,8 +169,8 @@ class InferenceConfig:
     # строками (по условию пустая строка лучше пропуска rid). Дедлайн считается
     # от старта процесса (включая загрузку весов). 15-мин лимит → берём запас.
     enable_wall_guard: bool = True
-    gen_budget_sec: float = 13.5 * 60        # переопределяется env GEN_BUDGET_SEC
-    gen_chunk_size: int = 512
+    gen_budget_sec: float = 13.0 * 60        # переопределяется env GEN_BUDGET_SEC
+    gen_chunk_size: int = 96
 
     def __post_init__(self) -> None:
         # Согласовать рантайм с тем, как училась дообученная модель: минимальный
