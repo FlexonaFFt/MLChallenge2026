@@ -1,137 +1,54 @@
-# Tasks
+# Задачи
 
-Use this file to classify the task and pick the first working baseline.
+Быстро классифицируй задачу, затем сделай валидный бейзлайн.
 
-## First 15 Minutes
+## Первые 15 минут
 
-Find:
+Запиши эти факты в `STATE.md`:
 
-- `INPUT:` table, text, image, time, pairs, documents, mixed.
-- `OUTPUT:` class, probability, number, text, JSON, ranking.
-- `METRIC:` F1, AUC, logloss, RMSE, MAE, NDCG, MAP, exact match, custom.
-- `SUBMISSION:` required columns, row count, id order, value ranges.
-- `LEAKAGE_RISK:` time, groups, duplicated entities, test-like rows.
+- `INPUT:` таблица, текст, изображения, время, пары, документы, смешанный формат.
+- `OUTPUT:` класс, вероятность, число, текст, JSON, ранжирование.
+- `METRIC:` F1, AUC, logloss, RMSE, MAE, NDCG, MAP, exact match, кастомная.
+- `SUBMISSION:` колонки, число строк, порядок id, допустимые значения.
+- `VALIDATION:` stratified, group, time, random, custom.
+- `LEAKAGE_RISK:` время, группы, дубликаты, подсказки таргета, test-like строки.
 
-## Decision Table
+## Роутер
 
-| Task shape | First baseline | Then try | Avoid early |
+| Тип задачи | Первый бейзлайн | Потом попробовать | Следить за |
 |---|---|---|---|
-| Tabular classification | CatBoost/LightGBM/sklearn | target encoding, ensembles | deep nets |
-| Tabular regression | CatBoost/LightGBM/sklearn | log target, robust loss | complex feature search |
-| Text classification | TF-IDF + LogisticRegression | embeddings, LLM features | fine-tuning first |
-| Pair matching | TF-IDF/embedding similarity | cross features, LLM judge | full RAG stack |
-| Retrieval/RAG | BM25/TF-IDF retrieval | embeddings, rerank | generation before retrieval works |
-| Information extraction | rules + local LLM JSON | validation parser, voting | free-form outputs |
-| Ranking/recsys | simple candidate features | LGBM ranker, embeddings | giant neural ranker |
-| Time series | lag/rolling features | grouped models, trend features | random split |
-| Image classification | pretrained embeddings/classifier | augmentations, ensembles | training from scratch |
-| Multimodal | separate text/image baselines | fusion features, VLM | one giant prompt only |
-| Text generation | prompt baseline | self-consistency, validation parser | unbounded outputs |
+| Tabular classification | CatBoost/LightGBM/sklearn | encoding, ансамбли | target leakage |
+| Tabular regression | CatBoost/LightGBM/sklearn | log target, robust loss | будущие данные |
+| Text classification | TF-IDF + LogisticRegression | embeddings, LLM features | дубликаты |
+| Pair matching | TF-IDF/embedding similarity | cross features, LLM judge | group leakage |
+| Retrieval/QA | TF-IDF/BM25 top-k | embeddings, rerank, generate | слабый retrieval |
+| Extraction | правила + LLM JSON | parser, voting | невалидный output |
+| Ranking/recsys | простые candidate features | ranker, embeddings | query leakage |
+| Time series | lag/rolling features | grouped models | random split |
+| Image classification | pretrained embeddings/head | augment, ensemble | подсказки в файлах |
+| Multimodal | отдельные text/image baseline | fusion, VLM | один огромный prompt |
+| Generation | строгий prompt + parser | self-consistency | неограниченный текст |
 
-## Tabular
+## Правила бейзлайна
 
-### Baseline
+- Сначала сделай валидный submission, потом оптимизируй.
+- Локально используй точную метрику, если возможно.
+- Держи один стабильный validation split для сравнений.
+- Меняй одну крупную вещь за один run.
+- Останавливай идею после двух запусков без прироста, если она явно не недотестирована.
 
-- Read train/test/sample submission.
-- Split with stratification for classification if possible.
-- Use simple preprocessing.
-- Try CatBoost/LightGBM if installed; otherwise sklearn.
+## Проверки leakage
 
-### Leakage
+- Один и тот же id/entity/user/document в train и validation.
+- Time split нарушен future features.
+- Target прямо или косвенно закодирован в тексте/колонках.
+- Preprocessing обучен на train+test, хотя должен быть train-only.
+- Дубликаты или near-duplicates текста/изображений между split.
 
-- Duplicated ids between train/test.
-- Target-derived columns.
-- Future timestamps.
-- Group overlap between train and validation.
+## Проверки submission
 
-## Text / NLP
-
-### Baseline
-
-- Clean only obvious broken text.
-- TF-IDF word + char ngrams.
-- LogisticRegression/LinearSVC/Ridge depending on metric.
-
-### Improvements
-
-- Local embeddings as features.
-- LLM-generated labels/features.
-- Pseudo-label high-confidence test rows only after a stable baseline.
-
-### Leakage
-
-- Same document in train/test.
-- User/item/group overlap.
-- Text containing labels or target hints.
-
-## Retrieval / QA
-
-### Baseline
-
-- Split documents into chunks.
-- Retrieve with TF-IDF/BM25.
-- Answer from top chunks only.
-
-### Improvements
-
-- Embeddings with `nomic-embed-text` or another local embedder.
-- Rerank top candidates.
-- Generate answer with citations from retrieved chunks.
-
-## Ranking
-
-### Baseline
-
-- Build query-candidate rows.
-- Features: text similarity, exact matches, length, ids, categories.
-- Optimize the real ranking metric if possible.
-
-### Leakage
-
-- Candidate order correlated with target.
-- Same query across train/validation.
-- Future interactions in train features.
-
-## Time Series
-
-### Baseline
-
-- Time-based validation only.
-- Lag features.
-- Rolling mean/std/min/max.
-- Calendar features.
-
-### Leakage
-
-- Random split.
-- Rolling features that use future rows.
-- Normalization fitted on all data.
-
-## Computer Vision
-
-### Baseline
-
-- Use installed pretrained model or image embeddings if available.
-- Freeze backbone first.
-- Train a small classifier head.
-
-### Leakage
-
-- Same image with different resize/compression.
-- Filename or folder target hints.
-- Group leakage by source/user/product.
-
-## Generation
-
-### Baseline
-
-- Prompt with strict output format.
-- Add parser and repair step.
-- Score locally on validation examples.
-
-### Improvements
-
-- Multiple prompts and voting.
-- Smaller fast model for draft, bigger model for final.
-- Rule-based postprocessing.
-
+- Те же строки, что в sample submission.
+- Тот же порядок id, если правила не говорят иначе.
+- Нет missing, inf, невалидных labels или неправильных dtypes.
+- Predictions clipped/normalized, если метрика этого ожидает.
+- Run, из которого сделан submission, записан в `RUNS.md`.

@@ -1,49 +1,67 @@
-# Final ML Playbook
+# Финальный ML Playbook
 
-This folder is the local offline guide for a 4-hour ML competition.
+Офлайн-инструкции для 4-часового ML-соревнования с двумя сессиями `src code`:
 
-## Agent Entry Point
+- `Research` решает, что пробовать.
+- `Builder` реализует и запускает эксперименты.
 
-Always start here.
+## Жесткие правила
 
-Read in this order:
+- На финале нельзя использовать интернет.
+- Нельзя использовать онлайн-LLM и внешние API.
+- Используй только локальные файлы, локальную документацию, локальные модели, инструменты VM и разрешенные офлайн-материалы.
+- Не устанавливай и не скачивай ничего, если это явно не доступно офлайн.
+- Перед финалом проверь локальные инструменты с выключенным Wi-Fi.
 
-1. `POLICY.md`
-2. `INSTRUCTIONS.md`
-3. `TASKS.md`
-4. `LLM_MODELS.md`
-5. `workspaces/<current_task>/README.md`
+## Файлы
 
-During work:
+- `TASKS.md` - роутер задач, бейзлайны, валидация и leakage.
+- `MODELS.md` - как использовать локальные LLM и модели.
+- `RESEARCH_AGENT.md` - инструкции для research-сессии.
+- `BUILD_AGENT.md` - инструкции для build-сессии.
+- `../workspaces/_template` - шаблон рабочей папки для каждой задачи.
 
-- Keep notes in `workspaces/<current_task>/`.
-- Use `T+MM` or `T+HH:MM` timestamps, not dates.
-- Log every meaningful action in `LOG.md`.
-- Log every tested idea in `EXPERIMENTS.md`.
-- Log failures and fixes in `ERRORS.md`.
-- Log submitted files in `SUBMISSION.md`.
-- Keep `HANDOFF_TO_SRC_CODE.md` ready for the VM agent.
+## Рабочая папка
 
-## Competition Workflow
+Для новой задачи:
 
-1. Copy `workspaces/_template` to `workspaces/<task_name>`.
-2. Fill `workspaces/<task_name>/README.md` from the task statement.
-3. Use `TASKS.md` to classify the task and pick the first baseline.
-4. Use `LLM_MODELS.md` only when a local model helps the metric.
-5. Use `INSTRUCTIONS.md` to keep experiments small and measurable.
-6. Before every submission, run the checks in `SUBMISSION.md`.
+```bash
+cp -R TheFinal/workspaces/_template TheFinal/workspaces/task_01
+```
 
-## Root Files
+В каждой задаче только четыре файла:
 
-- `POLICY.md` - final-round constraints and allowed tools.
-- `INSTRUCTIONS.md` - working rules for local brainstorming agents.
-- `TASKS.md` - task router and baseline recipes.
-- `LLM_MODELS.md` - local model usage and llama.cpp notes.
-- `workspaces/` - per-task memory and handoff notes.
+- `STATE.md` - общая правда: задача, данные, метрика, текущий лучший результат.
+- `PLAN.md` - Research пишет гипотезы и следующую задачу для Builder.
+- `RUNS.md` - Builder пишет команды, эксперименты, ошибки и скор.
+- `FINAL.md` - чеклист финального сабмита и выбранный файл.
 
-## Minimal Local Setup
+Используй время формата `T+MM` или `T+HH:MM`, не даты.
 
-- LM Studio with a local model for brainstorming.
-- A local code/chat tool if needed, configured to use `http://localhost:1234/v1`.
-- No internet, no online LLMs, no external APIs during the final.
+## Порядок чтения
 
+Research:
+
+1. `README.md`
+2. `TASKS.md`
+3. `MODELS.md`
+4. `RESEARCH_AGENT.md`
+5. `../workspaces/<task>/STATE.md`
+6. `../workspaces/<task>/PLAN.md`
+
+Builder:
+
+1. `README.md`
+2. `TASKS.md`
+3. `BUILD_AGENT.md`
+4. `../workspaces/<task>/STATE.md`
+5. `../workspaces/<task>/PLAN.md`
+6. `../workspaces/<task>/RUNS.md`
+
+## План на 4 часа
+
+- `T+00:00-T+00:20`: изучить задачу, данные, метрику, sample submission.
+- `T+00:20-T+01:00`: сделать первый валидный бейзлайн и сабмит.
+- `T+01:00-T+02:30`: запускать маленькие измеримые улучшения.
+- `T+02:30-T+03:30`: ансамблировать или доработать лучших кандидатов.
+- `T+03:30-T+04:00`: остановить рискованные эксперименты, проверить финальный сабмит.
